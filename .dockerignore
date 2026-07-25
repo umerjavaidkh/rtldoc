@@ -1,0 +1,11 @@
+.git
+book/
+output/
+eval/
+tests/
+*.md
+.gitignore
+.DS_Store
+**/__pycache__
+**/*.pyc
+*.egg-info

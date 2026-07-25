@@ -279,6 +279,39 @@ SEC filings, a company policy document, a WHO report) are third-party
 copyrighted material used locally for testing, not redistributed in this
 repo. Drop your own PDFs in `book/` to run everything above.
 
+### Docker
+
+No Python environment to set up, nothing to conflict with: rtldoc's actual
+runtime dependencies are just **PyMuPDF and numpy** — both ship prebuilt
+wheels, so the image needs no compiler and no system libraries at all.
+`opencv-python-headless` (only for the not-yet-wired scanned-page fallback)
+and `arabic-reshaper`/`python-bidi` (only for the local test-fixture
+generator) are real dependencies of *other parts of this repo*, but nothing
+the CLI itself imports — so they're `pip install rtldoc[cv]` /
+`rtldoc[dev]` extras, not baked into the image.
+
+```bash
+docker build -t rtldoc:light .
+```
+
+**399MB**, verified locally (`docker images`) — mostly the `python:3.12-slim`
+base itself. Compare that to a Docling or Marker image, which starts with
+torch and model weights before your code even runs.
+
+Run it against your own PDFs with a volume mount:
+
+```bash
+docker run --rm \
+  -v "$(pwd)/book:/data:ro" \
+  -v "$(pwd)/out:/out" \
+  rtldoc:light parse /data/yourfile.pdf --md /out/pages --json /out/book.json
+```
+
+`ENTRYPOINT` is `rtldoc`, so any subcommand works the same way:
+`docker run --rm -v "$(pwd)/book:/data:ro" rtldoc:light audit /data/yourfile.pdf`.
+Verified end-to-end in-container against both an Arabic PDF and an English
+10-K before writing this section — not just a Dockerfile that looks right.
+
 ---
 
 ## 10. Roadmap

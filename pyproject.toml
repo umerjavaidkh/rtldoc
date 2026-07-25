@@ -10,10 +10,15 @@ requires-python = ">=3.10"
 dependencies = [
     "pymupdf>=1.24",
     "numpy",
-    "opencv-python-headless",
-    "arabic-reshaper",
-    "python-bidi",
 ]
+
+[project.optional-dependencies]
+# cvfallback.py (pixel-based fallback for scanned/flattened pages) isn't
+# wired into the pipeline yet -- nothing in rtldoc/ imports cv2 today.
+cv = ["opencv-python-headless"]
+# Only tests/make_fixture.py (the synthetic-PDF generator for local testing)
+# needs these; the parser itself never shapes or reverses text on its own.
+dev = ["arabic-reshaper", "python-bidi"]
 
 [project.scripts]
 rtldoc = "rtldoc.cli:main"
