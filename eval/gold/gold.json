@@ -1,0 +1,116 @@
+{
+  "_instructions": [
+    "For each page below, open the matching image in eval/gold/images/<id>.png (or the PDF page directly) and fill in `blocks`.",
+    "`blocks` = the correct reading-order list of text chunks on the page, largest reasonable unit at a time (a heading is one block, a paragraph is one block -- don't go line-by-line). Use the SAME script/language as the page (Arabic stays Arabic, don't translate). Order matters: this is what reading-order scoring checks.",
+    "You don't have to transcribe every diacritic-perfect character -- close, faithful transcription is enough; the edit-distance metric tolerates small differences.",
+    "If a page has a real table (bordered or not), also fill in `table` as a list of rows, each row a list of cell strings, in the table's natural reading order (top-to-bottom rows; for Arabic tables, right-to-left columns). Leave `table` as null if the page has no table.",
+    "Skip a page entirely (delete its object) if you'd rather not label it -- fewer, correct labels beat more, sloppy ones.",
+    "Run: python eval/run_matrix.py eval/gold/gold.json  once you've filled at least a few pages in, to sanity-check the format before doing all of them."
+  ],
+  "pages": [
+    {
+      "id": "arabic_p5",
+      "pdf": "book/BilArabi_TG07.pdf",
+      "page": 5,
+      "doc_type": "arabic_single_column",
+      "blocks": [],
+      "table": null
+    },
+    {
+      "id": "arabic_p10",
+      "pdf": "book/BilArabi_TG07.pdf",
+      "page": 10,
+      "doc_type": "arabic_single_column",
+      "blocks": [],
+      "table": null
+    },
+    {
+      "id": "arabic_p88",
+      "pdf": "book/BilArabi_TG07.pdf",
+      "page": 88,
+      "doc_type": "arabic_two_column",
+      "blocks": [],
+      "table": null
+    },
+    {
+      "id": "arabic_p150",
+      "pdf": "book/BilArabi_TG07.pdf",
+      "page": 150,
+      "doc_type": "arabic_table_bordered",
+      "blocks": [],
+      "table": null
+    },
+    {
+      "id": "googl_p4",
+      "pdf": "book/GOOGL_10-K_2017-02-03.pdf",
+      "page": 4,
+      "doc_type": "english_two_column_toc",
+      "blocks": [],
+      "table": null
+    },
+    {
+      "id": "googl_p40",
+      "pdf": "book/GOOGL_10-K_2017-02-03.pdf",
+      "page": 40,
+      "doc_type": "english_single_column",
+      "blocks": [],
+      "table": null
+    },
+    {
+      "id": "googl_p68",
+      "pdf": "book/GOOGL_10-K_2017-02-03.pdf",
+      "page": 68,
+      "doc_type": "english_table_bordered",
+      "blocks": [],
+      "table": null
+    },
+    {
+      "id": "meta_p6",
+      "pdf": "book/META_10-K_2018-02-01.pdf",
+      "page": 6,
+      "doc_type": "english_single_column",
+      "blocks": [],
+      "table": null
+    },
+    {
+      "id": "meta_p83",
+      "pdf": "book/META_10-K_2018-02-01.pdf",
+      "page": 83,
+      "doc_type": "english_table_borderless",
+      "blocks": [],
+      "table": null
+    },
+    {
+      "id": "rag1_p3",
+      "pdf": "book/rag_document.pdf",
+      "page": 3,
+      "doc_type": "english_toc",
+      "blocks": [],
+      "table": null
+    },
+    {
+      "id": "rag1_p5",
+      "pdf": "book/rag_document.pdf",
+      "page": 5,
+      "doc_type": "english_single_column",
+      "blocks": [],
+      "table": null
+    },
+    {
+      "id": "rag2_p10",
+      "pdf": "book/rag_document_2.pdf",
+      "page": 10,
+      "doc_type": "english_figure_caption",
+      "blocks": [],
+      "table": null
+    },
+    {
+      "id": "rag2_p20",
+      "pdf": "book/rag_document_2.pdf",
+      "page": 20,
+      "doc_type": "english_single_column",
+      "blocks": [],
+      "table": null
+    }
+  ]
+}

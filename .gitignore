@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.DS_Store
+output/
+
+# Source PDFs and their rendered page images are third-party copyrighted
+# documents (a commercial Arabic textbook, SEC filings, a company policy doc,
+# a WHO report) used locally for testing -- not redistributed here. Keep your
+# own copies in book/ and eval/gold/images/ to run the code and eval harness.
+book/*.pdf
+eval/gold/images/*.png

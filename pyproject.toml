@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rtldoc"
+version = "0.1.0"
+description = "Geometry-first parser for RTL complex-layout PDFs (Arabic educational publishing)"
+requires-python = ">=3.10"
+dependencies = [
+    "pymupdf>=1.24",
+    "numpy",
+    "opencv-python-headless",
+    "arabic-reshaper",
+    "python-bidi",
+]
+
+[project.scripts]
+rtldoc = "rtldoc.cli:main"
+
+[tool.setuptools]
+packages = ["rtldoc"]
