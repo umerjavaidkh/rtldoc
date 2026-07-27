@@ -48,11 +48,20 @@ saved reports).
 
 ## Use it
 
+Install without cloning, pinned to the release:
+
 ```bash
-pip install -e .                 # runtime deps: just PyMuPDF + numpy
+pip install "git+https://github.com/umerjavaidkh/rtldoc.git@v1.0.0"
+```
+
+Then:
+
+```bash
 rtldoc parse book.pdf --md out/ --json out.json
 rtldoc audit book.pdf            # flags low-confidence pages for review
 ```
+
+Runtime deps are just PyMuPDF + numpy. (From a clone: `pip install -e .`.)
 
 Zero-setup via Docker (399 MB, no compiler/GPU):
 

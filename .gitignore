@@ -12,3 +12,4 @@ book/*.pdf
 eval/gold/images/*.png
 corpus/
 corpus_books/
+dist/
