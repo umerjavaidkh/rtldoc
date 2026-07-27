@@ -10,3 +10,4 @@ output/
 # own copies in book/ and eval/gold/images/ to run the code and eval harness.
 book/*.pdf
 eval/gold/images/*.png
+corpus/

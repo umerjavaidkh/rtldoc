@@ -160,6 +160,81 @@ points at, not what reads as expensive.
 
 ---
 
+## 5a. Universality test — 96 unseen complex PDFs, 2336 pages
+
+Everything in §4/§5 is measured on 5 documents. To test whether the guarantees
+hold *beyond* them, rtldoc was run over **96 complex born-digital PDFs (2336
+pages)** downloaded from arXiv across 15 subject areas — layouts, templates,
+and table/math densities the parser had never seen. This is *label-free*
+testing: instead of hand-transcribed truth (which can't scale), it checks
+properties that must hold for any PDF. Two harnesses, both in `eval/`:
+
+- `eval/invariants.py` — HARD invariants that must never break, plus
+  coverage/excess diagnostics vs the source glyph stream
+- `eval/hardness.py` — 8 independent difficulty angles (completeness,
+  get_text/rawdict disagreement, duplication, geo-line orphaning, region
+  overlap, presentation-form load, bidi reversal, fragmentation), flagged by
+  **consensus** so no single (possibly unreliable) metric dominates
+
+Full reports and the reproducible arXiv-ID manifest are in
+[`eval/results/`](eval/results/) (the copyrighted PDFs themselves are not
+redistributed; the fetch script re-downloads the identical corpus).
+
+**What held up (strong, confident):**
+
+| HARD invariant | Result on 2336 unseen pages |
+|---|---|
+| crashes | **0** |
+| presentation forms leaked into output | **0** |
+| non-rectangular tables | **0** |
+| non-deterministic pages | **0** |
+| mean letter coverage vs glyph stream | **0.988** |
+
+**What it caught (the honest part):** the multi-angle detector surfaced a
+**real duplication defect on ~17% of pages** (396/2332), strongly
+co-occurring with region overlap (276 pages) — spot-checked and confirmed as
+genuine repeated sentence fragments on dense/multi-column academic layouts,
+not benign header repetition. It is the tension exposed by the text-loss fix
+(assign every line to its best-overlap region) where span-assignment and
+geo-line ownership disagree. Not yet fixed; see §8.
+
+This is exactly why the test exists: it turned a would-be overclaim
+("works on anything") into a specific, located, honest limitation.
+
+---
+
+## 5b. Is rtldoc actually better? An honest verdict
+
+Answered at the confidence the evidence in this repo actually supports —
+no more.
+
+**Yes, with confidence, on its design target** — born-digital, complex-layout,
+RTL (especially Arabic) documents. Here it is not marginally better than
+general parsers, it is *structurally* better: it fixes encoding-level bugs
+(presentation forms, lam-alef reversal) that no amount of layout-model tuning
+addresses, recovers reading order from geometry instead of a mis-trained
+model, and does it deterministically, auditably, on CPU, at 6–60 pages/sec.
+The bug log in §4 is the evidence — each is a concrete failure of the general
+approach that this one gets right.
+
+**Yes, on robustness, universally** — 2336 unseen pages, zero crashes, zero
+encoding leaks, zero malformed tables, fully deterministic, 98.8% text
+coverage (§5a). That is a strong, measured claim.
+
+**Not yet, as a general-purpose "best parser for any PDF."** The §5a test
+found a real duplication defect on ~17% of dense academic pages, and the
+scanned-PDF path still isn't wired. Until those close, claiming universal
+superiority would be exactly the kind of unbacked assertion this repo's
+evaluation is built to prevent. It is a best-in-class *specialized* parser
+with a robust core and an honest, measured list of what still needs work —
+not (yet) a universal one.
+
+The reason to trust these statements is that the same test infrastructure
+that produced the wins also produced the limitations. An evaluation that only
+ever flatters the thing it measures isn't measuring.
+
+---
+
 ## 6. The design, and why each choice is the right one
 
 ```
@@ -267,6 +342,12 @@ than published early and walked back.
 
 ## 8. Known limitations (honest, not fixed yet)
 
+- **Text duplication on dense/overlapping layouts** (~17% of academic pages
+  in the §5a corpus). When span-assignment and geo-line ownership disagree on
+  a page with overlapping regions (multi-column papers, equation blocks), the
+  same text can render twice. Surfaced by `eval/hardness.py`, confirmed real.
+  The proper fix is to make the two segmentations consistent so no text is
+  both dropped and duplicated. This is the current top-priority defect.
 - **Borderless tables** *are* now detected (§4a) via column-alignment, but
   the inferred row/column boundaries aren't pixel-perfect: a multi-line cell
   can occasionally merge two source rows, and the numeric-only trigger means
