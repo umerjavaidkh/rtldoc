@@ -20,12 +20,28 @@ Two ideas do the heavy lifting here.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
 import numpy as np
 
 from .primitives import Fill, PagePrimitives, Rect, Span, containment
+
+# A "cell-like" span: short, so a wrapped prose line never votes for a column.
+_CELL_MAX_CHARS = 18
+# A numeric cell: digits + the punctuation that decorates them ($ , . % ( ) - +).
+# The aligned columns of a genuine borderless data table are overwhelmingly
+# these; aligned *words* (Arabic MCQ options, an answer key, a two-column list)
+# are not -- which is the signal that keeps this off text that merely lines up.
+_NUM_CELL = re.compile(r"^[\s$€£¥%()+\-–.,0-9٠-٩۰-۹]+$")
+
+
+def _is_numeric_cell(t: str) -> bool:
+    t = t.strip()
+    if not t or not _NUM_CELL.match(t):
+        return False
+    return any(ch.isdigit() for ch in t) or t in "$€£¥%"
 
 RegionKind = Literal["panel", "chip", "figure", "flow", "rule", "table"]
 
@@ -138,10 +154,167 @@ def detect_tables(prim: PagePrimitives, min_rows: int = 2, min_cols: int = 2,
     return [table]
 
 
+def _group_lines(spans: list[Span]) -> list[list[Span]]:
+    """Group spans into visual lines by baseline, returned top-to-bottom."""
+    lines: dict[int, list[Span]] = {}
+    for s in spans:
+        key = round(((s.bbox[1] + s.bbox[3]) / 2) / max(s.size * 0.5, 1.0))
+        lines.setdefault(key, []).append(s)
+    return [lines[k] for k in sorted(lines)]
+
+
+def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: int = 3,
+                             tol: float = 6.0, pad: float = 2.0) -> list[Region]:
+    """Recover tables that have no drawn rules at all -- financial statements
+    and data tables that separate columns with shading or whitespace only.
+
+    The signal is column *alignment recurring across rows*: in a table, the
+    same x-positions carry a cell row after row; in prose they don't. So we
+    only ever call something a table where that alignment actually exists,
+    which is what keeps this from shredding ordinary paragraphs the way a
+    page-wide text-alignment table finder does.
+
+    Numeric/short cells are right-aligned almost universally in real tables,
+    so columns are found by clustering the *right edges* of short spans and
+    keeping only those an alignment supports across >= min_rows rows. Long
+    (prose) spans never vote, so a wrapped sentence can't invent a column.
+    """
+    lines = _group_lines(prim.spans)
+    if len(lines) < min_rows:
+        return []
+
+    # 1. column votes: right edges of short, cell-like spans, tagged by row
+    votes: list[tuple[float, int]] = []
+    for li, ln in enumerate(lines):
+        for s in ln:
+            if len(s.text.strip()) <= _CELL_MAX_CHARS:
+                votes.append((s.bbox[2], li))
+    if len(votes) < min_rows * min_cols:
+        return []
+    votes.sort()
+
+    # 2. greedy-cluster right edges into candidate columns
+    clusters: list[dict] = []
+    cur: dict | None = None
+    for x, li in votes:
+        if cur is not None and x - cur["last"] <= tol:
+            cur["xs"].append(x)
+            cur["lines"].add(li)
+            cur["last"] = x
+        else:
+            cur = {"xs": [x], "lines": {li}, "last": x}
+            clusters.append(cur)
+
+    # 3. a real column is one an alignment supports across enough rows
+    real = [c for c in clusters if len(c["lines"]) >= min_rows]
+    if len(real) < min_cols:
+        return []
+    real_lines = [c["lines"] for c in real]
+
+    # 4. strongly-tabular rows hit >= min_cols of those columns; split them
+    #    into contiguous bands (a page can hold two stacked tables)
+    def hits(li: int) -> int:
+        return sum(1 for s in real_lines if li in s)
+
+    tab = [li for li in range(len(lines)) if hits(li) >= min_cols]
+    if len(tab) < min_rows:
+        return []
+
+    bands: list[list[int]] = []
+    run = [tab[0]]
+    for prev, cur_li in zip(tab, tab[1:]):
+        # allow up to 2 non-tabular lines between (wrapped labels, blank rows)
+        if cur_li - prev <= 3:
+            run.append(cur_li)
+        else:
+            bands.append(run)
+            run = [cur_li]
+    bands.append(run)
+
+    out: list[Region] = []
+    for band in bands:
+        if len(band) < min_rows:
+            continue
+        lo, hi = band[0], band[-1]
+        row_lines = lines[lo:hi + 1]                # include wrapped-label rows
+        band_spans = [s for ln in row_lines for s in ln]
+        # which columns actually appear in this band
+        band_cols = [c for c in real if c["lines"] & set(range(lo, hi + 1))]
+        if len(band_cols) < min_cols:
+            continue
+        centers = sorted(sum(c["xs"]) / len(c["xs"]) for c in band_cols)
+
+        # Guard: the aligned cells must be predominantly numeric. This is what
+        # separates a real data table from Arabic MCQ options / an answer key /
+        # a two-column list that merely happens to line up. Without it, aligned
+        # *words* get shredded into a garbage grid.
+        aligned = [s for ln in row_lines for s in ln
+                   if len(s.text.strip()) <= _CELL_MAX_CHARS
+                   and any(abs(s.bbox[2] - cx) <= tol for cx in centers)]
+        if not aligned:
+            continue
+        numeric_frac = sum(_is_numeric_cell(s.text) for s in aligned) / len(aligned)
+        if numeric_frac < 0.6:
+            continue
+
+        # Guard: the grid must actually be *filled*. A real data table puts a
+        # value at most row/column intersections; scattered list numbers or
+        # page-credit numbers that merely happen to align leave the grid mostly
+        # empty. This rejects a numbered exercise or an image-credits page whose
+        # numbers coincidentally line up in >= min_cols places.
+        filled = sum(
+            1
+            for ln in row_lines
+            for cx in centers
+            if any(abs(s.bbox[2] - cx) <= tol and len(s.text.strip()) <= _CELL_MAX_CHARS for s in ln)
+        )
+        if filled / (len(row_lines) * len(centers)) < 0.5:
+            continue
+
+        # each column's left/right extent, from the spans that align to it
+        extents = []
+        for cx in centers:
+            members = [sp for ln in row_lines for sp in ln if abs(sp.bbox[2] - cx) <= tol]
+            if not members:
+                continue
+            extents.append((min(sp.bbox[0] for sp in members), max(sp.bbox[2] for sp in members)))
+        if len(extents) < min_cols:
+            continue
+
+        table_x0 = min(s.bbox[0] for s in band_spans)
+        # vertical column splits: label | col0 | col1 | ...
+        splits = [table_x0, extents[0][0] - pad]
+        for j in range(len(extents) - 1):
+            splits.append((extents[j][1] + extents[j + 1][0]) / 2)
+        splits.append(extents[-1][1] + pad)
+
+        row_ys = [ (min(s.bbox[1] for s in ln) + max(s.bbox[3] for s in ln)) / 2 for ln in row_lines ]
+        rbounds = [min(s.bbox[1] for s in band_spans) - pad]
+        for a, b in zip(row_ys, row_ys[1:]):
+            rbounds.append((a + b) / 2)
+        rbounds.append(max(s.bbox[3] for s in band_spans) + pad)
+
+        table = Region(bbox=(splits[0], rbounds[0], splits[-1], rbounds[-1]), kind="table")
+        for ri in range(len(rbounds) - 1):
+            for ci in range(len(splits) - 1):
+                table.cells.append(Region(
+                    bbox=(splits[ci], rbounds[ri], splits[ci + 1], rbounds[ri + 1]),
+                    kind="flow", table_row=ri, table_col=ci))
+        out.append(table)
+    return out
+
+
 def propose_regions(prim: PagePrimitives, min_panel_area: float = 2000.0) -> list[Region]:
     regions: list[Region] = []
 
-    regions.extend(detect_tables(prim))
+    tables = detect_tables(prim)
+    # borderless detection only where a drawn-rule table doesn't already cover
+    # the area, so the two never fight over the same grid
+    for bt in detect_borderless_tables(prim):
+        if not any(containment(bt.bbox, t.bbox) > 0.3 or containment(t.bbox, bt.bbox) > 0.3
+                   for t in tables):
+            tables.append(bt)
+    regions.extend(tables)
 
     panels = _merge_nested([f for f in prim.fills if f.is_panel and f.area >= min_panel_area])
     for f in panels:

@@ -131,6 +131,17 @@ def _table_text(region: Region, owned: dict[int, list], opts: arabic.NormalizeOp
         diags["presentation_forms"] += d.get("presentation_forms", 0)
         grid[cell.table_row][cell.table_col] = text.replace("\n", "<br>").replace("|", "/").strip()
 
+    # Drop wholly-empty rows and columns. Borderless-table column/row
+    # boundaries are inferred from alignment, so a slightly-misplaced split can
+    # leave a phantom empty column or a blank row; trimming them costs nothing
+    # and also tidies vector tables that had an unused frame line.
+    keep_cols = [ci for ci in range(ncols) if any(grid[ri][ci] for ri in range(nrows))]
+    keep_rows = [ri for ri in range(nrows) if any(grid[ri][ci] for ci in range(ncols))]
+    if not keep_cols or not keep_rows:
+        return "", diags
+    grid = [[grid[ri][ci] for ci in keep_cols] for ri in keep_rows]
+    ncols = len(keep_cols)
+
     lines = []
     for ri, row in enumerate(grid):
         lines.append("| " + " | ".join(row) + " |")

@@ -62,7 +62,7 @@ separate so neither gets overstated:
 | Lam-alef / ligature integrity | ✅ ligature stays atomic through reordering (`primitives.py`, `TEXT_PRESERVE_LIGATURES`) | ❌ inherits PyMuPDF/pdfium's decomposition order² | ❌ same | ✅ reads pixels, doesn't hit this bug class | ❌ hits PyMuPDF #2199 directly² |
 | Presentation-form deshaping | ✅ `arabic.deshape`, scoped to the two Arabic presentation blocks only | ⚠️ depends on backend text extraction | ⚠️ depends on backend text extraction | ✅ | ❌ |
 | Table structure from vector rules | ✅ works with **zero visible borders needed** for panels/chips; ✅ recovers full grids from stroked *or* filled rule lines (see §4) | ✅ TableFormer, model-based | ✅ Surya-based, model-based | ⚠️ often right, not auditable, costs per page | ❌ no structure at all |
-| Table structure with **no rules at all** (shading only) | ❌ known gap, honestly reported in §5 (META p.83) | ⚠️ model-based, may or may not catch it — untested here | ⚠️ same | ⚠️ likely reads it correctly (visual), not auditable | ❌ |
+| Table structure with **no rules at all** (shading only) | ✅ recovered by column-alignment detection (§4a) — verified on META p.83's borderless quarterly statement; numeric-density guards keep it off aligned *text* | ⚠️ model-based, may or may not catch it — untested here | ⚠️ same | ⚠️ likely reads it correctly (visual), not auditable | ❌ |
 | Cross-column semantic linking (exercise ↔ answer key) | ✅ `_link_activities`, publisher-specific but real | ❌ no concept of this at all | ❌ | ❌ | ❌ |
 | Auditability (why did this text come out this way) | ✅ every transform is a named, inspectable function; `rtldoc audit` flags low-confidence pages | ❌ black-box model inference | ❌ | ❌ | N/A (it's not doing anything) |
 | Cost per page (born-digital) | ✅ ~3-8ms, no GPU, no API | ⚠️ CPU-feasible, model inference cost | ⚠️ same | ❌ 100-1000× more expensive³ | ✅ free |
@@ -105,6 +105,32 @@ making sure the parser doesn't secretly only work on one book.
 Every one of these is independently checkable: the exact before/after text
 is in the conversation history that produced this repo, and the fixes are
 in the numbered commits.
+
+### 4a. Borderless table recovery (the critique's hardest gap, now closed)
+
+The one gap a reviewer flagged that a "lightweight parallel parser" was
+supposed to cover — borderless tables (financial statements that separate
+columns with shading or whitespace, no drawn rules) — turned out *not* to be
+solvable by routing to another tool: pdfplumber's text-alignment table mode,
+run on META 10-K p.83, shredded the entire page (prose included) into a
+77×16 grid, splitting words mid-token. So it's fixed *inside* rtldoc instead
+(`layout.detect_borderless_tables`), keyed on the one unambiguous signal:
+
+- **column alignment recurring across rows** — the right edges of short cells
+  cluster into columns, and a column only counts if ≥3 rows support it, so a
+  wrapped prose line can never invent one;
+- **a numeric-majority guard** — the aligned cells must be predominantly
+  numeric, which is what separates a data table from Arabic MCQ options, an
+  answer key, or a two-column list that merely happens to line up;
+- **a grid-fill guard** — the grid must actually be *filled*, which rejects a
+  numbered exercise or an image-credits page whose stray numbers coincidentally
+  align in a few places.
+
+Verified across the whole corpus: recovers real tables on ~27 GOOGL and ~20
+META pages that previously extracted as prose fragments, fires on **zero**
+Arabic pages (the two initial false positives — an exercise and a
+credits page — are exactly what the numeric and fill guards were added to
+reject), and leaves all 239 Arabic pages' text content byte-identical.
 
 ---
 
@@ -225,7 +251,7 @@ else's numbers:
 - `eval/gold/gold.json` — hand-labeled gold pages spanning exactly the cases
   §1 and §4 describe: Arabic single-column, Arabic two-column, Arabic
   bordered table, English prose, English bordered table, English
-  **borderless** table (the known gap), TOC pages, figure/caption pages
+  **borderless** table (now recovered, §4a), TOC pages, figure/caption pages
 - `eval/gold/images/*.png` — rendered reference images for labeling (gitignored, see §9)
 
 ```bash
@@ -241,9 +267,12 @@ than published early and walked back.
 
 ## 8. Known limitations (honest, not fixed yet)
 
-- **Borderless tables** (shading/whitespace only, no drawn rules) aren't
-  detected as tables at all — falls back to flowing-paragraph extraction.
-  Confirmed gap: META 10-K p.83, a real 8-column financial statement.
+- **Borderless tables** *are* now detected (§4a) via column-alignment, but
+  the inferred row/column boundaries aren't pixel-perfect: a multi-line cell
+  can occasionally merge two source rows, and the numeric-only trigger means
+  a purely *textual* borderless table (no numbers) is still missed. The data
+  is recovered and correctly column-associated; the grid geometry is
+  approximate.
 - **Orphaned diacritic marks**: some PDF fonts emit a harakat glyph as its
   own tiny span disconnected from its base letter; these show up as
   single-character noise blocks on a few pages.
@@ -329,7 +358,9 @@ Verified end-to-end in-container against both an Arabic PDF and an English
 **Near term**
 - Wire the OCR/VLM audit fallback for the ~3-8% flagged pages, using the
   vector-extracted text as a constraint so the model corrects rather than re-reads
-- Borderless table detection (whitespace/shading-based, no drawn rules)
+- Tighten borderless-table grid geometry (multi-line cell merging; extend
+  beyond numeric tables to purely textual borderless ones) — detection itself
+  now shipped, see §4a
 - Complete gold-label transcription and publish full eval numbers
 - Style-map learning: cluster signatures across a whole book and propose
   labels, so the human confirms rather than types
