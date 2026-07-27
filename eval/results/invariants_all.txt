@@ -1,0 +1,24 @@
+# invariant report: 106 PDF(s), 7833 pages
+
+## HARD invariants (any nonzero is a bug)
+  crashes                : 0
+  presentation forms out : 0
+  non-rectangular tables : 0
+  non-deterministic pages: 0
+
+## SOFT diagnostics (distributions, flags are for review)
+  mean letter coverage   : 0.990  (1.0 = no text lost)
+  mean letter excess     : 0.119  (0.0 = nothing duplicated)
+  pages flagged low cov  : 172  (<0.85)
+  pages flagged high exc : 1576  (>0.15)
+  pages routed to OCR     : 85  (no text layer; expected for scans)
+
+  worst coverage pages:
+    0.091  2607.22230v1.pdf p17
+    0.224  2607.22144v1.pdf p14
+    0.245  2607.22466v1.pdf p5
+    0.247  college-physics-2e.pdf p200
+    0.256  college-physics-2e.pdf p1502
+    0.257  chemistry-2e.pdf p84
+    0.262  college-physics-2e.pdf p687
+    0.264  chemistry-2e.pdf p549
