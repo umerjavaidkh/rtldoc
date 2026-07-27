@@ -75,10 +75,16 @@ class Glyph:
         return (self.x0 + self.x1) / 2
 
 
-def glyphs_from_page(page: "fitz.Page", clip: tuple | None = None) -> list[Glyph]:
+def glyphs_from_page(page: "fitz.Page", clip: tuple | None = None,
+                     raw: dict | None = None) -> list[Glyph]:
     out: list[Glyph] = []
-    raw = page.get_text("rawdict", clip=fitz.Rect(clip) if clip else None,
-                        flags=fitz.TEXTFLAGS_RAWDICT | fitz.TEXT_PRESERVE_LIGATURES)
+    # `raw` lets the caller pass a rawdict already extracted elsewhere
+    # (extract_page needs the same one) so the page isn't tokenized twice.
+    # It's only reusable when no clip is requested -- a clipped call needs
+    # its own, narrower extraction.
+    if raw is None or clip is not None:
+        raw = page.get_text("rawdict", clip=fitz.Rect(clip) if clip else None,
+                            flags=fitz.TEXTFLAGS_RAWDICT | fitz.TEXT_PRESERVE_LIGATURES)
     for block in raw["blocks"]:
         if block.get("type") != 0:
             continue
@@ -176,10 +182,11 @@ def line_to_text(line: list[Glyph], space_frac: float = 0.20) -> str:
     return "".join(parts)
 
 
-def page_lines(page: "fitz.Page", clip: tuple | None = None) -> list[tuple[tuple, str]]:
+def page_lines(page: "fitz.Page", clip: tuple | None = None,
+               raw: dict | None = None) -> list[tuple[tuple, str]]:
     """Return [(bbox, logical_text)] for every baseline, top to bottom."""
     out = []
-    for line in group_baselines(glyphs_from_page(page, clip)):
+    for line in group_baselines(glyphs_from_page(page, clip, raw)):
         if not line:
             continue
         bbox = (min(g.x0 for g in line), min(g.y - g.size for g in line),

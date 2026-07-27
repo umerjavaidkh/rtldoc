@@ -214,7 +214,13 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     opts = opts or arabic.NormalizeOptions()
     style_map = style_map or DEFAULT_STYLE_MAP
 
-    prim = extract_page(page)
+    # One native text extraction, shared by extract_page (spans) and geobidi
+    # (per-glyph). rawdict is a superset of dict, so this single pass serves
+    # both consumers instead of tokenizing the page twice.
+    from .primitives import rawdict as _rawdict
+    raw = _rawdict(page)
+
+    prim = extract_page(page, raw=raw)
     result = PageResult(page=prim.number, columns=0, born_digital=prim.is_born_digital)
 
     if not prim.is_born_digital:
@@ -233,7 +239,7 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     if geometry_bidi:
         try:
             from . import geobidi
-            geo_lines = geobidi.page_lines(page)
+            geo_lines = geobidi.page_lines(page, raw=raw)
         except Exception:
             geo_lines = []
 

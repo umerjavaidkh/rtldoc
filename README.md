@@ -112,15 +112,25 @@ in the numbered commits.
 
 | Document | Pages | Time | Pages/sec | Images (deduped) | Audit review-rate |
 |---|---:|---:|---:|---:|---:|
-| Arabic teacher's guide (`BilArabi_TG07.pdf`) | 239 | 31.4s | 7.6 | 415 | 2.1% |
-| GOOGL 10-K (2016 fiscal year) | 162 | 3.5s | 46.3 | 1 | 3.7% |
-| META 10-K (2017 fiscal year) | 144 | 6.1s | 23.7 | 5 | 8.3% |
-| Company compliance policy (`rag_document.pdf`) | 12 | 0.76s | 15.8 | 36 | 8.3% |
-| WHO report (`rag_document_2.pdf`) | 52 | 9.0s | 5.8 | 31 | 7.7% |
+| Arabic teacher's guide (`BilArabi_TG07.pdf`) | 239 | 23.5s | 10.2 | 415 | 2.1% |
+| GOOGL 10-K (2016 fiscal year) | 162 | 2.7s | 60.0 | 1 | 3.7% |
+| META 10-K (2017 fiscal year) | 144 | 5.5s | 26.2 | 5 | 8.3% |
+| Company compliance policy (`rag_document.pdf`) | 12 | 0.74s | 16.2 | 36 | 8.3% |
+| WHO report (`rag_document_2.pdf`) | 52 | 8.6s | 6.0 | 31 | 7.7% |
 
 No GPU, no external API calls, single CPU core mostly idle. "Audit
 review-rate" is `rtldoc audit`'s own confidence flag (§7) — the fraction of
 pages it thinks should get a second look, not an external quality score.
+
+These numbers are ~10–25% faster than this repo's first cut: profiling
+showed ~70% of per-page time was PyMuPDF's native text extraction, called
+**twice** per page (`get_text("dict")` for spans + `get_text("rawdict")` for
+per-glyph bidi). Since rawdict is a strict superset of dict, one extraction
+now serves both — verified byte-identical output across all 609 pages of the
+five documents above. The lesson worth keeping: the bottleneck was the
+native call count, not any of the Python-level layout/bidi loops, which
+collectively account for under 10% of runtime. Optimize what the profiler
+points at, not what reads as expensive.
 
 ---
 
