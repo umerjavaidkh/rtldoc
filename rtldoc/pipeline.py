@@ -68,10 +68,13 @@ def _chip_number(region: Region) -> int | None:
 
 
 def _region_text_geo(region: Region, geo_lines, opts) -> tuple[str, dict]:
-    """Preferred path: take pre-reconstructed geometric lines that fall inside
-    this region. Text order comes from glyph coordinates, not from the
-    extractor's bidi guess."""
-    picked = [(bb, t) for bb, t in geo_lines if containment(bb, region.bbox) > 0.55]
+    """Preferred path: render the geometric lines this region owns, in reading
+    order. Text order comes from glyph coordinates, not the extractor's bidi
+    guess. Ownership is decided once by the caller (parse_page), so we do NOT
+    re-filter by containment here -- an earlier redundant containment gate on
+    top of an already-inflated line bbox silently dropped a line the region
+    genuinely owned, losing that text entirely."""
+    picked = list(geo_lines)
     if not picked:
         return "", {}
     picked.sort(key=lambda p: p[0][1])
@@ -259,6 +262,14 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     # independently (the old behaviour) let two overlapping regions -- a
     # panel and a stray flow block covering the same text, say -- each
     # separately claim it, which duplicated that text in the output.
+    #
+    # Assign to the *best-overlap* region, not to any region clearing a fixed
+    # containment floor: geobidi's line bboxes are padded by a full font size
+    # above the baseline, so a line the region genuinely owns can score well
+    # under 0.55 and, with a hard floor, get orphaned and dropped. Argmax with
+    # only a tiny epsilon keeps the single-owner property (so no duplicates
+    # come back) while guaranteeing every line that overlaps *some* region is
+    # rendered.
     owned: dict[int, list] = {}
     if geo_lines:
         leaf_regions = list(regions)
@@ -266,7 +277,7 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
             if r.kind == "table":
                 leaf_regions.extend(r.cells)
         for bb, gtext in geo_lines:
-            best, best_score = None, 0.55
+            best, best_score = None, 1e-6
             for r in leaf_regions:
                 c = containment(bb, r.bbox)
                 if c > best_score:
