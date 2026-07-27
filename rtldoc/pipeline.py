@@ -181,6 +181,48 @@ def _fallback_role(region: Region, page: PagePrimitives) -> str:
     return "paragraph"
 
 
+def _dedupe_blocks(blocks: list["Block"], quality: dict[int, int], min_len: int = 12) -> None:
+    """Merge policy: a text line that appears across more than one block is
+    kept only in the highest render-quality block and stripped from the rest.
+
+    Cross-block only: identical lines *within* one block are genuine source
+    repetition and left untouched. Ties in quality keep the earliest block in
+    reading order. Short lines (< min_len) are ignored -- a bare number or a
+    one-word heading can legitimately recur, and removing it would lose real
+    content for no benefit.
+    """
+    per_block_lines: list[list[str] | None] = []
+    occ: dict[str, list[tuple[int, int]]] = {}
+    for bi, b in enumerate(blocks):
+        if b.role in ("figure", "table") or not b.text:
+            per_block_lines.append(None)
+            continue
+        lines = b.text.split("\n")
+        per_block_lines.append(lines)
+        for li, ln in enumerate(lines):
+            key = ln.strip()
+            if len(key) >= min_len:
+                occ.setdefault(key, []).append((bi, li))
+
+    remove: set[tuple[int, int]] = set()
+    for spots in occ.values():
+        blocks_involved = {bi for bi, _ in spots}
+        if len(blocks_involved) < 2:
+            continue                      # all in one block -> genuine repeat
+        best_bi = max(sorted(blocks_involved), key=lambda bi: quality.get(id(blocks[bi]), 1))
+        for bi, li in spots:
+            if bi != best_bi:
+                remove.add((bi, li))
+
+    if not remove:
+        return
+    for bi, lines in enumerate(per_block_lines):
+        if lines is None:
+            continue
+        kept = [ln for li, ln in enumerate(lines) if (bi, li) not in remove]
+        blocks[bi].text = "\n".join(kept).strip()
+
+
 def _nearest_caption(fig: "Block", blocks: list["Block"], max_chars: int = 120) -> str:
     """Attach whichever other block sits geometrically closest to a figure,
     as its caption -- captions are conventionally adjacent to the image they
@@ -285,24 +327,43 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
             if best is not None:
                 owned.setdefault(id(best), []).append((bb, gtext))
 
+    # Render quality per block, for the merge policy below: text recovered
+    # from glyph geometry (correct bidi) beats the span-based fallback, and a
+    # table cell grid is authoritative.
+    quality: dict[int, int] = {}
     for r in regions:
         if r.kind == "table":
             text, diag = _table_text(r, owned, opts)
+            q = 3
         elif geo_lines:
             text, diag = _region_text_geo(r, owned.get(id(r), []), opts)
+            q = 2
             if not text and r.spans:
                 text, diag = _region_text(r, opts)
+                q = 1
         else:
             text, diag = _region_text(r, opts)
+            q = 1
         style = _dominant_style(r)
         role = style_map.get(style or "", None) or _fallback_role(r, prim)
         if role == "activity_marker" and not text:
             continue
-        result.blocks.append(
-            Block(role=role, text=text, bbox=tuple(round(v, 1) for v in r.bbox),
-                  order=r.order or 0, column=r.column, activity=r.activity,
-                  style=style, diagnostics=diag, image_xref=r.image_xref)
-        )
+        block = Block(role=role, text=text, bbox=tuple(round(v, 1) for v in r.bbox),
+                      order=r.order or 0, column=r.column, activity=r.activity,
+                      style=style, diagnostics=diag, image_xref=r.image_xref)
+        result.blocks.append(block)
+        quality[id(block)] = q
+
+    # MERGE POLICY. When two overlapping regions disagree on ownership, the
+    # same text can be rendered by both -- once via the geo path, once via a
+    # neighbour's span fallback -- so a line that occurs ONCE in the PDF comes
+    # out twice. Rather than perfectly reconcile the two segmentations, drop
+    # the duplicate and keep the best copy: a line appearing across more than
+    # one block is kept only in the highest render-quality block and removed
+    # from the others. Repeats WITHIN a single block are left alone (those are
+    # genuine), so faithful source duplication survives while parser-side
+    # double-emission does not.
+    _dedupe_blocks(result.blocks, quality)
 
     # A figure has no text of its own -- geometrically attach the nearest
     # other block's text as a caption, so a photo or chart isn't rendered
