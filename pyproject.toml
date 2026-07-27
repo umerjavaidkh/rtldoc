@@ -4,8 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rtldoc"
-version = "0.1.0"
-description = "Geometry-first parser for RTL complex-layout PDFs (Arabic educational publishing)"
+version = "1.0.0"
+description = "Geometry-first PDF parser for RTL and complex layouts (Arabic textbooks, financial tables, multi-column docs)"
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
     "pymupdf>=1.24",
