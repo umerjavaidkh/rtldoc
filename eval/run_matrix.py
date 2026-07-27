@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from eval.adapters import ADAPTERS
-from eval import metrics
+from eval import metrics, teds
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # pdf_parser/
@@ -40,11 +40,10 @@ def run(gold_path: str) -> dict:
             order_score = metrics.reading_order_score(entry["blocks"], pred.get("blocks", []))
             table_score = None
             if entry.get("table"):
+                # TEDS (field-standard table metric) against the best-matching
+                # predicted table; 0 if the parser produced no table at all.
                 pred_tables = pred.get("tables") or []
-                best = 0.0
-                for t in pred_tables:
-                    best = max(best, metrics.table_cell_score(entry["table"], t))
-                table_score = best if pred_tables else 0.0
+                table_score = max((teds.teds(t, entry["table"]) for t in pred_tables), default=0.0)
             rows[name].append({
                 "id": entry["id"], "doc_type": entry.get("doc_type", "unknown"),
                 "text": text_score, "order": order_score, "table": table_score,
@@ -54,7 +53,7 @@ def run(gold_path: str) -> dict:
 
 
 def report(rows: dict[str, list[dict]]) -> str:
-    lines = ["| Parser | Text edit-score | Reading-order score | Table cell score | Errors |",
+    lines = ["| Parser | Text edit-score | Reading-order score | Table TEDS | Errors |",
             "|---|---|---|---|---|"]
     for name, results in rows.items():
         text_scores = [r["text"] for r in results]

@@ -1,0 +1,17 @@
+(skipped 12 page(s) with no gold `blocks` yet)
+
+| Parser | Text edit-score | Reading-order score | Table TEDS | Errors |
+|---|---|---|---|---|
+| naive_pymupdf | 0.112 | 0.000 | 0.000 | 0 |
+| pdfplumber | 0.112 | 0.000 | 0.053 | 0 |
+| rtldoc | 0.094 | 0.000 | 0.319 | 0 |
+
+### By document type
+
+**english_table_borderless**
+
+| Parser | Text edit-score | Reading-order score |
+|---|---|---|
+| naive_pymupdf | 0.112 | 0.000 |
+| pdfplumber | 0.112 | 0.000 |
+| rtldoc | 0.094 | 0.000 |

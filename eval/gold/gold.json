@@ -77,8 +77,23 @@
       "pdf": "book/META_10-K_2018-02-01.pdf",
       "page": 83,
       "doc_type": "english_table_borderless",
-      "blocks": [],
-      "table": null
+      "blocks": [
+        "Quarterly Results of Operations Data",
+        "The following tables set forth our unaudited quarterly consolidated statements of income data in dollars and as a percentage of total revenue for each of the eight quarters in the period ended December 31, 2017.",
+        "Share-based compensation expense included in costs and expenses:"
+      ],
+      "table": [
+        ["", "Dec 31, 2017", "Sep 30, 2017", "Jun 30, 2017", "Mar 31, 2017", "Dec 31, 2016", "Sep 30, 2016", "Jun 30, 2016", "Mar 31, 2016"],
+        ["Advertising", "$ 12,779", "$ 10,142", "$ 9,164", "$ 7,857", "$ 8,629", "$ 6,816", "$ 6,239", "$ 5,201"],
+        ["Payments and other fees", "193", "186", "157", "175", "180", "195", "197", "181"],
+        ["Total revenue", "12,972", "10,328", "9,321", "8,032", "8,809", "7,011", "6,436", "5,382"],
+        ["Cost of revenue", "1,611", "1,448", "1,237", "1,159", "1,047", "987", "917", "838"],
+        ["Research and development", "1,949", "2,052", "1,919", "1,834", "1,563", "1,542", "1,471", "1,343"],
+        ["Marketing and sales", "1,374", "1,170", "1,124", "1,057", "1,118", "926", "901", "826"],
+        ["General and administrative", "686", "536", "640", "655", "515", "439", "413", "365"],
+        ["Total costs and expenses", "5,620", "5,206", "4,920", "4,705", "4,243", "3,894", "3,702", "3,372"],
+        ["Income from operations", "7,352", "5,122", "4,401", "3,327", "4,566", "3,117", "2,734", "2,010"]
+      ]
     },
     {
       "id": "rag1_p3",

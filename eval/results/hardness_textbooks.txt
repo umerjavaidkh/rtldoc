@@ -1,0 +1,36 @@
+# hardness report: 4835 pages across 4 PDF(s)
+
+## which angles fire most (systematic weak spots)
+  completeness    106  
+  disagreement      0  
+  duplication     456  ###
+  orphaning       101  
+  overlap           4  
+  presentation      0  
+  reversal          0  
+  fragmentation     4  
+
+  crashes: 0
+
+## hardest pages (>=2 angles agree), top 20
+consensus | page | fired angles
+     2    | calculus-volume-1.pdf  p6    | duplication, overlap
+     2    | calculus-volume-1.pdf  p52   | completeness, duplication
+     2    | calculus-volume-1.pdf  p57   | duplication, orphaning
+     2    | calculus-volume-1.pdf  p138  | duplication, orphaning
+     2    | calculus-volume-1.pdf  p162  | duplication, orphaning
+     2    | calculus-volume-1.pdf  p187  | completeness, duplication
+     2    | calculus-volume-1.pdf  p387  | duplication, orphaning
+     2    | calculus-volume-1.pdf  p499  | completeness, duplication
+     2    | calculus-volume-1.pdf  p502  | completeness, duplication
+     2    | calculus-volume-1.pdf  p742  | duplication, orphaning
+     2    | chemistry-2e.pdf       p6    | duplication, overlap
+     2    | chemistry-2e.pdf       p34   | completeness, duplication
+     2    | chemistry-2e.pdf       p628  | completeness, duplication
+     2    | college-physics-2e.pdf p6    | duplication, overlap
+     2    | college-physics-2e.pdf p420  | completeness, duplication
+     2    | organic-chemistry.pdf  p6    | duplication, overlap
+     2    | organic-chemistry.pdf  p59   | completeness, duplication
+     2    | organic-chemistry.pdf  p169  | completeness, duplication
+     2    | organic-chemistry.pdf  p954  | completeness, duplication
+     2    | organic-chemistry.pdf  p955  | completeness, orphaning

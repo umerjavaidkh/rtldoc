@@ -132,6 +132,54 @@ Arabic pages (the two initial false positives — an exercise and a
 credits page — are exactly what the numeric and fill guards were added to
 reject), and leaves all 239 Arabic pages' text content byte-identical.
 
+### 4b. Merge policy for cross-block duplication
+
+The universality test (§5a) caught a defect the 5-document regression never
+could: on dense/overlapping layouts, span-assignment and geo-line ownership
+disagree about which region owns a piece of text, so the same line renders
+twice — once via the geometry path, once via a neighbour's span fallback.
+Confirmed a genuine parser-side bug, not source repetition: the phrase
+occurred **once** in the PDF (both PyMuPDF extractors agree) and **twice** in
+the output.
+
+Rather than perfectly reconcile the two segmentations, a merge policy
+(`pipeline._dedupe_blocks`) resolves it directly: a line appearing across more
+than one block is kept only in the **highest render-quality block** (geometry
+beats span-fallback) and stripped from the rest. Repeats *within* one block
+are left untouched, so faithful source duplication survives while parser-side
+double-emission does not. Result on the 96-PDF corpus: duplication-flagged
+pages **396 → 86 (−78%)**, with text coverage unchanged (0.988) and every HARD
+invariant still zero — the fix removed duplication without bringing back the
+text loss it traded against.
+
+### 4c. Table accuracy, scored the way the field scores tables (TEDS)
+
+Coverage proxies don't measure tables; the field standard is **TEDS**
+(Tree-Edit-Distance Similarity, from PubTabNet — also used by FinTabNet and
+OmniDocBench). It turns each table into an HTML tree and scores the normalized
+tree edit distance, so a merged cell or a dropped row costs what it should.
+Implemented from scratch in `eval/teds.py` (Zhang-Shasha tree edit distance,
+self-tested, no external dependency), with full **colspan/rowspan** support via
+an HTML-table parser (the PubTabNet gold format), a **TEDS-Struct** variant
+that scores grid structure alone, wired into `eval/run_matrix.py`, and run
+against a hand-transcribed gold table (META 10-K p.83, the borderless quarterly
+income statement):
+
+| Parser | Table TEDS on META p.83 |
+|---|---|
+| naive `page.get_text()` | 0.000 (produces no table) |
+| pdfplumber | 0.053 (shreds the page into a 77×16 grid) |
+| **rtldoc** | **0.319** |
+
+rtldoc wins decisively on the standard metric — but the honest read is in the
+absolute number, not just the ranking. 0.319 is a *clear win, not a high
+score*: rtldoc recovers the **data** correctly (every value lands in the right
+quarter column) but the **grid geometry** is approximate — it merged the top
+three rows into one multi-line cell and kept two phantom empty columns, which
+TEDS rightly penalizes. So the industry metric confirms both halves of the
+§8 story: the extraction is right, the inferred structure needs work. That's
+the next place to push table quality, now that it's measurable.
+
 ---
 
 ## 5. Measured performance (5 real documents, this repo)
@@ -342,12 +390,12 @@ than published early and walked back.
 
 ## 8. Known limitations (honest, not fixed yet)
 
-- **Text duplication on dense/overlapping layouts** (~17% of academic pages
-  in the §5a corpus). When span-assignment and geo-line ownership disagree on
-  a page with overlapping regions (multi-column papers, equation blocks), the
-  same text can render twice. Surfaced by `eval/hardness.py`, confirmed real.
-  The proper fix is to make the two segmentations consistent so no text is
-  both dropped and duplicated. This is the current top-priority defect.
+- **Text duplication on dense/overlapping layouts** — *largely fixed.* It was
+  ~17% of academic pages (span-assignment and geo-line ownership disagreeing
+  on overlapping multi-column regions, so a line rendered twice). A merge
+  policy (§4b) cut it to ~4% (arXiv corpus 396→86 flagged pages, −78%) with no
+  text-loss regression. The residual is the hardest overlap cases; the merge
+  keeps the best copy of any line that still double-renders.
 - **Borderless tables** *are* now detected (§4a) via column-alignment, but
   the inferred row/column boundaries aren't pixel-perfect: a multi-line cell
   can occasionally merge two source rows, and the numeric-only trigger means

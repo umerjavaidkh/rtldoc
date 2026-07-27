@@ -1,46 +1,31 @@
 # hardness report: 2332 pages across 96 PDF(s)
 
 ## which angles fire most (systematic weak spots)
-  completeness     61  #
+  completeness     62  #
   disagreement      0  
-  duplication     396  ######
+  duplication      86  #
   orphaning        24  
   overlap         276  ####
   presentation      0  
   reversal          0  
-  fragmentation    66  #
+  fragmentation    67  #
 
   crashes: 0
 
-## hardest pages (>=2 angles agree), top 30
+## hardest pages (>=2 angles agree), top 15
 consensus | page | fired angles
-     3    | 2607.21323v1.pdf       p37   | duplication, overlap, fragmentation
-     3    | 2607.22028v1.pdf       p39   | duplication, overlap, fragmentation
-     3    | 2607.22470v1.pdf       p27   | duplication, overlap, fragmentation
-     3    | 2607.22527v1.pdf       p10   | duplication, overlap, fragmentation
      3    | 2607.22532v1.pdf       p20   | duplication, overlap, fragmentation
      3    | 2607.22532v1.pdf       p22   | duplication, overlap, fragmentation
      2    | 2607.20720v1.pdf       p5    | duplication, overlap
      2    | 2607.20720v1.pdf       p10   | duplication, overlap
-     2    | 2607.20720v1.pdf       p37   | completeness, duplication
      2    | 2607.20720v1.pdf       p39   | duplication, overlap
      2    | 2607.20720v1.pdf       p40   | duplication, overlap
-     2    | 2607.21323v1.pdf       p11   | duplication, overlap
+     2    | 2607.21323v1.pdf       p37   | overlap, fragmentation
      2    | 2607.21323v1.pdf       p41   | overlap, fragmentation
-     2    | 2607.21323v1.pdf       p42   | duplication, fragmentation
-     2    | 2607.21807v1.pdf       p11   | duplication, overlap
-     2    | 2607.21807v1.pdf       p19   | duplication, overlap
+     2    | 2607.21807v1.pdf       p11   | overlap, fragmentation
      2    | 2607.21807v1.pdf       p38   | overlap, fragmentation
-     2    | 2607.21989v1.pdf       p6    | duplication, overlap
-     2    | 2607.21989v1.pdf       p7    | duplication, overlap
-     2    | 2607.22028v1.pdf       p25   | duplication, fragmentation
+     2    | 2607.22028v1.pdf       p39   | overlap, fragmentation
      2    | 2607.22106v1.pdf       p33   | overlap, fragmentation
      2    | 2607.22144v1.pdf       p2    | duplication, overlap
      2    | 2607.22144v1.pdf       p5    | duplication, overlap
      2    | 2607.22144v1.pdf       p14   | completeness, duplication
-     2    | 2607.22144v1.pdf       p15   | completeness, duplication
-     2    | 2607.22161v1.pdf       p9    | duplication, overlap
-     2    | 2607.22213v1.pdf       p3    | duplication, overlap
-     2    | 2607.22213v1.pdf       p15   | duplication, overlap
-     2    | 2607.22240v1.pdf       p2    | duplication, overlap
-     2    | 2607.22240v1.pdf       p5    | duplication, overlap

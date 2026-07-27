@@ -34,12 +34,27 @@ letter coverage vs the true glyph stream: 0.988.
 
 **The multi-angle detector found a real, systematic defect** the 5-document
 regression testing could never have surfaced: text **duplication** on ~17% of
-pages (396/2332), strongly co-occurring with region **overlap** (276 pages).
-Spot-checked and confirmed genuine — real sentence fragments repeated on
-dense/multi-column academic pages, not benign header repetition. This is the
-honest limitation stated in the top-level README; it is the tension exposed by
-the text-loss fix (assign every line to its best-overlap region) on layouts
-where span-assignment and geo-line ownership disagree.
+pages (396/2332 originally), co-occurring with region **overlap**. Spot-checked
+and confirmed genuine (once in source, twice in output — a parser bug, not
+source repetition). A merge policy (`pipeline._dedupe_blocks`) then cut it to
+~4% (**396 → 86 flagged pages, −78%**) with text coverage unchanged (0.988) and
+all HARD invariants still zero — the numbers in `invariants_corpus.txt` /
+`hardness_corpus.txt` here are the post-fix state.
 
-That is the point of label-free universality testing: it caught a defect that
-would otherwise have shipped as an overclaim.
+## Textbooks (physics / chemistry / calculus / organic / biology)
+
+`invariants_textbooks.txt` and `hardness_textbooks.txt` are the same harnesses
+run over 5 OpenStax textbooks (CC-BY), **4888 pages** of the hardest layout —
+geometry diagrams, figures, tables, worked examples, exercises, chemical
+structures. HARD invariants: all zero. Coverage 0.990.
+
+## Table accuracy (TEDS)
+
+`teds_meta_p83.txt` scores the borderless META 10-K income statement with
+**TEDS** (the PubTabNet/OmniDocBench table metric, implemented in
+`eval/teds.py`): rtldoc **0.319** vs pdfplumber 0.053 vs naive 0.000 — a clear
+win, with the modest absolute number honestly reflecting approximate grid
+geometry (right data, merged rows).
+
+That is the point of label-free universality testing plus one real
+gold-standard metric: it produced both the wins and the limitations.

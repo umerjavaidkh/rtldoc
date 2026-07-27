@@ -1,6 +1,4 @@
 # invariant report: 96 PDF(s), 2336 pages
-# corpus: 96 complex born-digital arXiv PDFs across 15 subject areas
-# (see corpus_manifest.txt for exact IDs; reproduce with eval/fetch_corpus.py)
 
 ## HARD invariants (any nonzero is a bug)
   crashes                : 0
@@ -10,14 +8,17 @@
 
 ## SOFT diagnostics (distributions, flags are for review)
   mean letter coverage   : 0.988  (1.0 = no text lost)
-  mean letter excess     : 0.151  (0.0 = nothing duplicated)
-  pages flagged low cov  : 61  (<0.85)
-  pages flagged high exc : 628  (>0.15)
-  pages routed to OCR    : 4  (no text layer; expected for scans)
+  mean letter excess     : 0.117  (0.0 = nothing duplicated)
+  pages flagged low cov  : 62  (<0.85)
+  pages flagged high exc : 356  (>0.15)
+  pages routed to OCR     : 4  (no text layer; expected for scans)
 
-# NOTE: `excess` here is measured against page.get_text(), which is itself
-# lossy on many pages (it returned ~25% of the real text on some), so this
-# number overstates duplication. The rawdict-based `duplication` angle in
-# hardness_corpus.txt is the reliable measurement -- and it confirms a REAL
-# duplication defect on ~17% of dense/overlapping academic pages, the honest
-# limitation called out in the top-level README.
+  worst coverage pages:
+    0.091  2607.22230v1.pdf p17
+    0.224  2607.22144v1.pdf p14
+    0.245  2607.22466v1.pdf p5
+    0.286  2607.22516v1.pdf p42
+    0.287  2607.22466v1.pdf p6
+    0.309  2607.18813v1.pdf p23
+    0.334  2607.22230v1.pdf p14
+    0.354  2607.22386v1.pdf p7
