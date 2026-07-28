@@ -100,14 +100,38 @@ def glyphs_from_page(page: "fitz.Page", clip: tuple | None = None,
     return out
 
 
-def group_baselines(glyphs: list[Glyph], tol_frac: float = 0.45) -> list[list[Glyph]]:
+def group_baselines(glyphs: list[Glyph], tol_frac: float = 0.45,
+                    col_gap_mult: float = 1.5) -> list[list[Glyph]]:
+    """Group glyphs into baselines by y-proximity, then split any baseline
+    that contains an abnormally wide horizontal gap.
+
+    Grouping by y alone is blind to columns: in a row-aligned multi-column
+    layout (extremely common -- two exercise lists, a teacher/pupil spread,
+    any textbook with parallel columns), the left and right column's text
+    routinely shares the same y, so a same-y grouping merges both columns'
+    glyphs into one "baseline" and reconstructs them as a single run --
+    weaving the two columns' characters together mid-word. A real column
+    gutter is many times wider than a normal inter-word space, which is what
+    this split catches without needing any column detection of its own.
+    """
     if not glyphs:
         return []
     lines: dict[int, list[Glyph]] = {}
     for g in glyphs:
         key = round(g.y / max(g.size * tol_frac, 1.0))
         lines.setdefault(key, []).append(g)
-    return [lines[k] for k in sorted(lines)]
+
+    out: list[list[Glyph]] = []
+    for key in sorted(lines):
+        ln = sorted(lines[key], key=lambda g: g.x0)
+        cluster = [ln[0]]
+        for prev, g in zip(ln, ln[1:]):
+            if g.x0 - prev.x1 > max(prev.size, g.size) * col_gap_mult:
+                out.append(cluster)
+                cluster = []
+            cluster.append(g)
+        out.append(cluster)
+    return out
 
 
 def _resolve_runs(line: list[Glyph]) -> list[Glyph]:

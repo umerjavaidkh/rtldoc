@@ -483,9 +483,18 @@ def _cluster_flow(spans: list[Span], gap_mult: float = 1.6, size_ratio: float = 
 # ---------------------------------------------------------------------------
 
 def _column_boundaries(bboxes: list[Rect], page_width: float, page_height: float,
-                       min_gap: float = 18.0, max_width_frac: float = 0.6,
+                       min_gap: float = 10.0, max_width_frac: float = 0.6,
                        empty_thresh: float = 0.04) -> list[float]:
     """2D-aware whitespace-gutter finder.
+
+    min_gap=10 (not the wider value this used to have): a real column gutter
+    measured directly on a physics textbook came out at 18pt, and 2pt x-axis
+    binning quantizes that down further -- a width floor much above 10
+    starts rejecting genuine, if narrow, gutters. Width is the weaker of the
+    two guards anyway; `empty_thresh` (persistence across the page's full
+    content height) is what actually tells a real gutter apart from an
+    indent or list marker, since those are never empty for anywhere near the
+    full column height the way a genuine gutter is.
 
     A 1D x-projection (ink present/absent per x, collapsing all y) is fooled
     two different ways: a single full-width element (a header, a footer, a
@@ -540,30 +549,35 @@ def _column_boundaries(bboxes: list[Rect], page_width: float, page_height: float
     return [left] + [((a + b) / 2) for a, b in gaps] + [right + xres]
 
 
-def _column_of(x_center: float, boundaries: list[float]) -> int:
+def _column_of(x_center: float, boundaries: list[float], rtl: bool = True) -> int:
     ncols = len(boundaries) - 1
     for i in range(ncols):
         if boundaries[i] <= x_center < boundaries[i + 1]:
-            # invert: rightmost physical column is logical column 0
-            return ncols - 1 - i
+            # column 0 is always "read first": rightmost for RTL, leftmost for LTR
+            return ncols - 1 - i if rtl else i
     return 0
 
 
 def detect_columns(regions: list[Region], page_width: float, page_height: float,
-                   min_gap: float = 18.0) -> int:
+                   min_gap: float = 10.0, rtl: bool = True) -> int:
     """Whitespace-projection column finder. Returns number of columns and
-    tags each region with its column index (0 = rightmost, RTL)."""
+    tags each region with its column index (0 = read first)."""
     if not regions:
         return 0
     boundaries = _column_boundaries([r.bbox for r in regions], page_width, page_height, min_gap)
     ncols = len(boundaries) - 1
     for r in regions:
-        r.column = _column_of(r.x_center, boundaries)
+        r.column = _column_of(r.x_center, boundaries, rtl)
     return ncols
 
 
-def rtl_xy_cut(regions: list[Region], min_gap: float = 14.0, depth: int = 0) -> list[Region]:
-    """Recursive XY-cut with right-to-left horizontal ordering."""
+def rtl_xy_cut(regions: list[Region], min_gap: float = 14.0, depth: int = 0, rtl: bool = True) -> list[Region]:
+    """Recursive XY-cut, horizontal order set by `rtl` -- right-to-left for
+    Arabic/Hebrew, left-to-right for everything else. Direction is a property
+    of the page's own text, decided once by the caller (parse_page checks
+    the page's script), never assumed: hardcoding "right first" reads an
+    English two-column page's columns in the wrong order, which is exactly
+    as wrong as reading an Arabic page left-to-right."""
     if len(regions) <= 1 or depth > 12:
         return regions
 
@@ -582,10 +596,13 @@ def rtl_xy_cut(regions: list[Region], min_gap: float = 14.0, depth: int = 0) -> 
 
     vgroups = _cut(0)
     if vgroups:
-        vgroups.sort(key=lambda g: -max(r.bbox[2] for r in g))   # RIGHT first
+        if rtl:
+            vgroups.sort(key=lambda g: -max(r.bbox[2] for r in g))   # RIGHT first
+        else:
+            vgroups.sort(key=lambda g: min(r.bbox[0] for r in g))    # LEFT first
         out = []
         for g in vgroups:
-            out.extend(rtl_xy_cut(g, min_gap, depth + 1))
+            out.extend(rtl_xy_cut(g, min_gap, depth + 1, rtl))
         return out
 
     hgroups = _cut(1)
@@ -593,16 +610,17 @@ def rtl_xy_cut(regions: list[Region], min_gap: float = 14.0, depth: int = 0) -> 
         hgroups.sort(key=lambda g: min(r.bbox[1] for r in g))    # TOP first
         out = []
         for g in hgroups:
-            out.extend(rtl_xy_cut(g, min_gap, depth + 1))
+            out.extend(rtl_xy_cut(g, min_gap, depth + 1, rtl))
         return out
 
-    # unsplittable: fall back to top-then-right
-    return sorted(regions, key=lambda r: (round(r.bbox[1] / 6), -r.bbox[2]))
+    # unsplittable: fall back to top-then-(right|left)
+    key = (lambda r: (round(r.bbox[1] / 6), -r.bbox[2])) if rtl else (lambda r: (round(r.bbox[1] / 6), r.bbox[0]))
+    return sorted(regions, key=key)
 
 
-def order_regions(regions: list[Region], page_width: float, page_height: float) -> list[Region]:
-    detect_columns(regions, page_width, page_height)
-    ordered = rtl_xy_cut(regions)
+def order_regions(regions: list[Region], page_width: float, page_height: float, rtl: bool = True) -> list[Region]:
+    detect_columns(regions, page_width, page_height, rtl=rtl)
+    ordered = rtl_xy_cut(regions, rtl=rtl)
     for i, r in enumerate(ordered):
         r.order = i
     return ordered
