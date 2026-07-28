@@ -23,7 +23,7 @@ and vector tables.
 
 ## Proven at scale
 
-Tested on **106 PDFs / 7,833 pages** it never saw during development — an
+Tested on **107 PDFs / 8,831 pages** it never saw during development — an
 Arabic teacher's guide, two SEC 10-Ks, 96 arXiv papers (15 fields), and 5
 OpenStax physics/chemistry/calculus textbooks (figures, geometry, exercises).
 The checks are *property-based and label-free*, so they scale to any corpus:
@@ -58,7 +58,8 @@ Then:
 
 ```bash
 rtldoc parse book.pdf --md out/ --json out.json
-rtldoc audit book.pdf            # flags low-confidence pages for review
+rtldoc parse book.pdf --html out_html/   # real <table>/<figure>, RTL-aware dir=
+rtldoc audit book.pdf                    # flags low-confidence pages for review
 ```
 
 Runtime deps are just PyMuPDF + numpy. (From a clone: `pip install -e .`.)
@@ -70,7 +71,7 @@ docker build -t rtldoc . && docker run --rm -v "$PWD:/d" rtldoc parse /d/book.pd
 ```
 
 Output: per-page Markdown (tables as GFM, images extracted + auto-captioned)
-plus structured JSON.
+plus structured JSON, or a self-contained HTML page per PDF page.
 
 ## Honest limits
 
