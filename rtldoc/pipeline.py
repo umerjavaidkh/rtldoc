@@ -46,6 +46,10 @@ class Block:
     # image bytes back out of the PDF (see save_images). Before save_images
     # runs, `text` holds the geometrically-nearest caption, if any was found.
     image_xref: int | None = None
+    # role == "figure" only: True for a merged cluster of overlapping raster
+    # fragments (see layout._cluster_images) -- image_xref is None in this
+    # case, and save_images rasterizes the bbox directly instead.
+    composite: bool = False
     # populated only for role == "table": the raw (row, col) text grid, so
     # to_html can emit a real <table> without re-parsing markdown pipes.
     table_grid: list[list[str]] | None = None
@@ -289,8 +293,8 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     # One native text extraction, shared by extract_page (spans) and geobidi
     # (per-glyph). rawdict is a superset of dict, so this single pass serves
     # both consumers instead of tokenizing the page twice.
-    from .primitives import rawdict as _rawdict
-    raw = _rawdict(page)
+    from .primitives import dedupe_duplicate_blocks, rawdict as _rawdict
+    raw = dedupe_duplicate_blocks(_rawdict(page))
 
     prim = extract_page(page, raw=raw)
     result = PageResult(page=prim.number, columns=0, born_digital=prim.is_born_digital)
@@ -373,7 +377,8 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
             continue
         block = Block(role=role, text=text, bbox=tuple(round(v, 1) for v in r.bbox),
                       order=r.order or 0, column=r.column, activity=r.activity,
-                      style=style, diagnostics=diag, image_xref=r.image_xref, table_grid=grid)
+                      style=style, diagnostics=diag, image_xref=r.image_xref,
+                      composite=r.composite, table_grid=grid)
         result.blocks.append(block)
         quality[id(block)] = q
 
@@ -435,9 +440,34 @@ def save_images(doc: "fitz.Document", results: list[PageResult], out_dir: str) -
     import os
 
     written_for_xref: dict[int, str] = {}
+    written_composite = 0
     for r in results:
+        page = None
         for b in r.blocks:
-            if b.role != "figure" or b.image_xref is None:
+            if b.role != "figure":
+                continue
+
+            if b.composite:
+                # A merged cluster of overlapping raster fragments (see
+                # layout._cluster_images) has no single xref that represents
+                # it -- rasterize the merged bbox straight off the page
+                # instead of trying to reassemble N separately-encoded
+                # layers into one image.
+                if page is None:
+                    page = doc[r.page - 1]
+                os.makedirs(out_dir, exist_ok=True)
+                fname = f"composite_{r.page:04d}_{round(b.bbox[0])}_{round(b.bbox[1])}.png"
+                try:
+                    pix = page.get_pixmap(clip=fitz.Rect(*b.bbox), matrix=fitz.Matrix(2, 2))
+                    pix.save(os.path.join(out_dir, fname))
+                except Exception:
+                    continue
+                written_composite += 1
+                alt = b.text.replace("]", ")").replace("[", "(")
+                b.text = f"![{alt}](images/{fname})"
+                continue
+
+            if b.image_xref is None:
                 continue
             fname = written_for_xref.get(b.image_xref)
             if fname is None:
@@ -454,7 +484,7 @@ def save_images(doc: "fitz.Document", results: list[PageResult], out_dir: str) -
                 written_for_xref[b.image_xref] = fname
             alt = b.text.replace("]", ")").replace("[", "(")
             b.text = f"![{alt}](images/{fname})"
-    return len(written_for_xref)
+    return len(written_for_xref) + written_composite
 
 
 def to_markdown(result: PageResult) -> str:

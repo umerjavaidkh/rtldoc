@@ -16,11 +16,13 @@ We pull three primitive streams:
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field, asdict
 from typing import Iterable
 
 import fitz  # PyMuPDF
 
+from .arabic import deshape
 
 Rect = tuple[float, float, float, float]
 
@@ -140,8 +142,225 @@ def _near_white(rgb: tuple[float, float, float], tol: float = 0.04) -> bool:
 _RAWDICT_FLAGS = fitz.TEXTFLAGS_RAWDICT | fitz.TEXT_PRESERVE_LIGATURES
 
 
+def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict, min_samples: int = 5,
+                              space_frac_thresh: float = 0.6) -> dict:
+    """Repair space glyphs whose ToUnicode CMap is internally inconsistent.
+
+    A glyph ID is a fixed visual shape within one embedded font -- it cannot
+    legitimately mean whitespace in one occurrence and a printable character
+    in another. Confirmed real case: an embedded Arabic font's blank-space
+    glyph was mapped by its own (corrupt) ToUnicode CMap to a plain space
+    most of the time, but to the digit '1' or an en-space in the rest,
+    purely depending on which CID subrange the subsetting tool happened to
+    consult -- rendering shows nothing there in every case, but the ~14%
+    minority reading silently injected a literal '1' into the extracted
+    text between nearly every word on the affected pages. Also confirmed on
+    a *different* document with a *different* font ("LiberationSans"),
+    confirming this is a general PDF-authoring-tool defect, not one file's
+    quirk.
+
+    General fix: tally, per (font, glyph-id), how often that glyph's
+    ToUnicode reading is whitespace across the whole page. If a large
+    majority reads as whitespace (the glyph's true identity, established by
+    consensus) but a specific occurrence reads as something else, that
+    occurrence is the corrupted minority -- correct it to a plain space.
+    Requires get_texttrace() (glyph IDs) since rawdict alone only exposes
+    the ToUnicode text, not the underlying glyph identity; occurrences are
+    matched back into `raw` by (font, origin) since both calls resolve the
+    same underlying glyph run. A real digit '1' glyph is untouched: it has
+    its own distinct glyph ID with its own (non-whitespace-majority) tally.
+    """
+    try:
+        trace = page.get_texttrace()
+    except Exception:
+        return raw
+
+    tallies: dict[tuple[str, int], list[int]] = {}
+    occurrences: list[tuple[str, int, tuple[float, float], str]] = []
+    for span in trace:
+        font = span.get("font", "")
+        for code, glyph, origin, _bbox in span.get("chars", []):
+            c = chr(code)
+            key = (font, glyph)
+            t = tallies.setdefault(key, [0, 0])
+            t[1] += 1
+            if c.isspace():
+                t[0] += 1
+            occurrences.append((font, glyph, origin, c))
+
+    space_glyphs = {k for k, (sp, tot) in tallies.items()
+                    if tot >= min_samples and sp / tot >= space_frac_thresh}
+    if not space_glyphs:
+        return raw
+
+    bad_positions = {
+        (font, round(origin[0], 1), round(origin[1], 1))
+        for font, glyph, origin, c in occurrences
+        if (font, glyph) in space_glyphs and not c.isspace()
+    }
+    if not bad_positions:
+        return raw
+
+    for block in raw.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                font = span.get("font", "")
+                for ch in span.get("chars", []):
+                    o = ch.get("origin")
+                    if o is None:
+                        continue
+                    if (font, round(o[0], 1), round(o[1], 1)) in bad_positions:
+                        ch["c"] = " "
+    return raw
+
+
 def rawdict(page: "fitz.Page") -> dict:
-    return page.get_text("rawdict", flags=_RAWDICT_FLAGS)
+    raw = page.get_text("rawdict", flags=_RAWDICT_FLAGS)
+    return _fix_broken_space_glyphs(page, raw)
+
+
+def _block_text(block: dict) -> str:
+    return "".join(ch["c"] for ln in block.get("lines", []) for sp in ln.get("spans", []) for ch in sp.get("chars", []))
+
+
+def _bbox_iou(a: Rect, b: Rect) -> float:
+    ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+    ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+    inter = (ix1 - ix0) * (iy1 - iy0)
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union else 0.0
+
+
+def _char_bag_similarity(a: str, b: str) -> float:
+    """Jaccard overlap of two strings' letter multisets, after deshaping.
+
+    Order-independent on purpose: a downstream reconstruction step can
+    legitimately scramble one copy's word order (see dedupe_duplicate_blocks)
+    without changing what letters are actually present, so comparing bags
+    of letters survives that scrambling where a literal string comparison
+    would not. Presentation-form glyphs are folded to base letters first so
+    two copies that differ only in font/shaping still compare equal.
+    """
+    na = Counter(c for c in deshape(a) if c.isalpha())
+    nb = Counter(c for c in deshape(b) if c.isalpha())
+    if not na or not nb:
+        return 0.0
+    inter = sum((na & nb).values())
+    union = sum((na | nb).values())
+    return inter / union if union else 0.0
+
+
+def _center(bbox: Rect) -> tuple[float, float]:
+    return ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+
+
+def dedupe_duplicate_blocks(raw: dict, iou_thresh: float = 0.2, sim_thresh: float = 0.6,
+                             shift_tol: float = 10.0) -> dict:
+    """Drop text blocks that duplicate another block's content.
+
+    Some PDFs contain genuinely duplicated draw operations for the same
+    visual element: a page carried two overlapping copies of a small
+    running-header (a "unit" label and, right next to it, a "lesson"
+    label), alongside byte-identical background-fill rectangles at the
+    same positions -- only one copy was ever visually apparent; the file's
+    own content stream is redundant, not our extraction.
+
+    Two techniques are combined because neither alone covers real pages:
+
+    1. Direct pairwise match: two blocks whose bboxes overlap (IoU) and
+       whose letter-bags are near-identical are a confirmed duplicate pair.
+       This catches the common case but misses it when a duplicated label
+       is itself split into multiple blocks with looser overlap (label
+       block widths/kerning differ slightly between the two copies, so a
+       downstream block in one copy can drift far enough that its IoU with
+       its counterpart falls under threshold even though the copy as a
+       whole is clearly a duplicate).
+
+    2. Shift-consistency extension, the same principle used in copy-move
+       (duplicated-region) forgery detection: once a confirmed pair
+       establishes the translation vector between "original" and "copy"
+       (e.g. the copy sits ~23pt to the right), any OTHER pair of blocks on
+       the page with matching letter-bags AND a center-to-center offset
+       within `shift_tol` of that same vector is confirmed too, even if
+       their raw IoU is low or zero. A pure proximity/clustering merge was
+       tried and rejected: on the page that surfaced this bug, the two
+       *different* labels within one copy sit closer to each other (~20pt)
+       than is safe to treat as "same visual unit", so naive distance-based
+       grouping merged unrelated labels together. Requiring a *specific,
+       already-confirmed* shift (not just "nearby") avoids that failure
+       while still catching the split-label case.
+
+    Between two duplicates, the one LATER in content-stream order is kept:
+    PDF rendering is a painter's algorithm, so a later draw sits on top and
+    is what a reader actually sees (confirmed against the render for the
+    case that surfaced this). Applied once here, on the raw dict shared by
+    both primitives.extract_page (spans) and geobidi.page_lines (glyphs),
+    so neither consumer can see the duplicate and neither needs its own
+    copy of this logic.
+    """
+    all_blocks = raw.get("blocks", [])
+    blocks = [b for b in all_blocks if b.get("type") == 0]
+    others = [b for b in all_blocks if b.get("type") != 0]
+    if len(blocks) < 2:
+        return raw
+
+    texts = [_block_text(b) for b in blocks]
+    bboxes = [tuple(b["bbox"]) for b in blocks]
+    centers = [_center(bb) for bb in bboxes]
+    valid = [len(t.strip()) >= 2 for t in texts]
+    n = len(blocks)
+
+    def sim(i: int, j: int) -> float:
+        return _char_bag_similarity(texts[i], texts[j])
+
+    drop: set[int] = set()
+    matched: set[int] = set()
+    shifts: list[tuple[float, float]] = []
+
+    # Pass 1: strong pairwise anchors -- geometric overlap + content match.
+    for i in range(n):
+        if i in matched or not valid[i]:
+            continue
+        for j in range(i + 1, n):
+            if j in matched or not valid[j]:
+                continue
+            if _bbox_iou(bboxes[i], bboxes[j]) < iou_thresh:
+                continue
+            if sim(i, j) >= sim_thresh:
+                drop.add(i)  # i < j: i is earlier in paint order, j sits on top
+                matched.update((i, j))
+                shifts.append((centers[j][0] - centers[i][0], centers[j][1] - centers[i][1]))
+                break
+
+    # Pass 2: extend via shift-consistency for blocks pass 1 didn't resolve
+    # (e.g. a duplicated label split across blocks whose individual IoU is
+    # too low, but whose offset matches an already-confirmed duplicate's).
+    if shifts:
+        remaining = [i for i in range(n) if valid[i] and i not in matched]
+        for a in range(len(remaining)):
+            i = remaining[a]
+            if i in matched:
+                continue
+            for b in range(a + 1, len(remaining)):
+                j = remaining[b]
+                if j in matched:
+                    continue
+                if sim(i, j) < sim_thresh:
+                    continue
+                dx, dy = centers[j][0] - centers[i][0], centers[j][1] - centers[i][1]
+                if any(abs(dx - sx) <= shift_tol and abs(dy - sy) <= shift_tol for sx, sy in shifts):
+                    drop.add(i)
+                    matched.update((i, j))
+                    break
+
+    kept = [b for i, b in enumerate(blocks) if i not in drop]
+    out = dict(raw)
+    out["blocks"] = kept + others
+    return out
 
 
 def extract_page(page: "fitz.Page", drop_white_fills: bool = True,

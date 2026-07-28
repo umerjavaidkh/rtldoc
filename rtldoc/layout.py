@@ -26,7 +26,7 @@ from typing import Literal
 
 import numpy as np
 
-from .primitives import Fill, PagePrimitives, Rect, Span, containment
+from .primitives import Fill, ImageRef, PagePrimitives, Rect, Span, containment
 
 # A "cell-like" span: short, so a wrapped prose line never votes for a column.
 _CELL_MAX_CHARS = 18
@@ -62,8 +62,15 @@ class Region:
     table_row: int | None = None
     table_col: int | None = None
     # populated only for kind == "figure": the xref needed to pull the image
-    # back out of the PDF later (see pipeline.save_images).
+    # back out of the PDF later (see pipeline.save_images). None for a
+    # composite figure (see below) -- there's no single xref that represents
+    # a merged cluster of overlapping image fragments.
     image_xref: int | None = None
+    # kind == "figure" only: True when this region is a merged cluster of
+    # multiple overlapping/nested raster fragments (see _cluster_images) --
+    # save_images rasterizes the bbox directly from the page instead of
+    # extracting any one xref, since no single fragment is "the" image.
+    composite: bool = False
 
     @property
     def x_center(self) -> float:
@@ -106,6 +113,46 @@ def _merge_collinear(rules: list[Fill], horizontal: bool, tol: float = 2.0) -> l
     return out
 
 
+def _cluster_rules(fills: list[Fill], pad: float = 8.0) -> list[list[Fill]]:
+    """Group rule fills by spatial proximity (union-find on padded bboxes).
+
+    A page can carry more than one table, plus assorted unrelated short
+    rules elsewhere (a decorative underline, a divider in a page header).
+    Computing one table's geometry from ALL rule fills on the page is
+    fragile: a single stray mark far from the real table can badly distort
+    a page-wide span calculation and silently break detection for a table
+    that has nothing to do with it (confirmed case: a ~470pt page-wide span
+    from two unrelated 1.6pt marks near the page header suppressed
+    detection of a genuine table whose real dividers only spanned 125pt).
+    Scoping every table's own geometry to its own spatially-local cluster
+    of rules removes that cross-contamination and also lets a page contain
+    more than one independently-detected table.
+    """
+    n = len(fills)
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def close(a: Rect, b: Rect) -> bool:
+        return not (a[2] + pad <= b[0] or b[2] + pad <= a[0] or a[3] + pad <= b[1] or b[3] + pad <= a[1])
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if close(fills[i].bbox, fills[j].bbox):
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[ri] = rj
+
+    groups: dict[int, list[Fill]] = {}
+    for i, f in enumerate(fills):
+        groups.setdefault(find(i), []).append(f)
+    return list(groups.values())
+
+
 def detect_tables(prim: PagePrimitives, min_rows: int = 2, min_cols: int = 2,
                   coverage: float = 0.5) -> list[Region]:
     """Recover table grids from stroked border lines (Fill.is_rule).
@@ -116,9 +163,26 @@ def detect_tables(prim: PagePrimitives, min_rows: int = 2, min_cols: int = 2,
     internal column split before calling something a table, so an ordinary
     ruled list (row separators only, e.g. a bibliography) doesn't get
     misdetected as a grid.
+
+    Rules are clustered spatially first (see _cluster_rules) and each
+    cluster is evaluated independently, so a page can yield more than one
+    table and a stray rule elsewhere on the page can't corrupt one it has
+    nothing to do with.
     """
-    horiz_rules = [f for f in prim.fills if f.is_rule and (f.bbox[2] - f.bbox[0]) > (f.bbox[3] - f.bbox[1])]
-    vert_rules = [f for f in prim.fills if f.is_rule and (f.bbox[3] - f.bbox[1]) > (f.bbox[2] - f.bbox[0])]
+    all_rules = [f for f in prim.fills if f.is_rule]
+    if not all_rules:
+        return []
+
+    tables: list[Region] = []
+    for cluster in _cluster_rules(all_rules):
+        tables.extend(_detect_table_in_cluster(cluster, min_rows, min_cols, coverage))
+    return tables
+
+
+def _detect_table_in_cluster(cluster: list[Fill], min_rows: int, min_cols: int,
+                             coverage: float) -> list[Region]:
+    horiz_rules = [f for f in cluster if (f.bbox[2] - f.bbox[0]) > (f.bbox[3] - f.bbox[1])]
+    vert_rules = [f for f in cluster if (f.bbox[3] - f.bbox[1]) > (f.bbox[2] - f.bbox[0])]
     if not horiz_rules or not vert_rules:
         return []
 
@@ -158,6 +222,21 @@ def detect_tables(prim: PagePrimitives, min_rows: int = 2, min_cols: int = 2,
     # those extremes in as the missing boundary.
     row_ys |= {round(min(y0 for _, y0, _ in vlines)), round(max(y1 for _, _, y1 in vlines))}
     col_xs |= {round(min(x0 for _, x0, _ in hlines)), round(max(x1 for _, _, x1 in hlines))}
+
+    # An INTERNAL row boundary (a header/first-row divider, say) can also be
+    # marked with no horizontal rule at all -- only by where the column
+    # dividers' own segments break. Trust a break only where a majority of
+    # the real column dividers agree on nearly the same y; a single
+    # divider's own rendering quirk can't invent a row boundary alone.
+    seg_break_votes: dict[int, int] = {}
+    for f in vert_rules:
+        if not any(abs(f.bbox[0] - x) <= 2.0 for x in col_xs):
+            continue
+        for y in (round(f.bbox[1]), round(f.bbox[3])):
+            seg_break_votes[y] = seg_break_votes.get(y, 0) + 1
+    min_agree = max(2, (len(col_xs) + 1) // 2)
+    row_ys |= {y for y, votes in seg_break_votes.items() if votes >= min_agree}
+
     row_ys, col_xs = sorted(row_ys), sorted(col_xs)
 
     if len(row_ys) - 1 < min_rows or len(col_xs) - 1 < min_cols:
@@ -372,10 +451,59 @@ def propose_regions(prim: PagePrimitives, min_panel_area: float = 2000.0) -> lis
         if f.is_chip:
             regions.append(Region(bbox=f.bbox, kind="chip", fill_color=f.color))
 
-    for img in prim.images:
-        regions.append(Region(bbox=img.bbox, kind="figure", image_xref=img.xref))
+    for cluster in _cluster_images(prim.images):
+        if len(cluster) == 1:
+            regions.append(Region(bbox=cluster[0].bbox, kind="figure", image_xref=cluster[0].xref))
+        else:
+            x0 = min(im.bbox[0] for im in cluster); y0 = min(im.bbox[1] for im in cluster)
+            x1 = max(im.bbox[2] for im in cluster); y1 = max(im.bbox[3] for im in cluster)
+            regions.append(Region(bbox=(x0, y0, x1, y1), kind="figure", composite=True))
 
     return regions
+
+
+def _cluster_images(images: list[ImageRef]) -> list[list[ImageRef]]:
+    """Group images whose boxes overlap or nest, transitively.
+
+    A complex illustration is very often exported as many small overlapping
+    raster layers -- a hand-drawn icon and a set of colored sticky-note
+    shapes, say, each its own placed image, tiled and stacked to form one
+    picture. Left as separate figure regions, each fragment independently
+    grabs the same nearby caption text, duplicating it once per fragment
+    (24 times, on the page that surfaced this). Merging overlapping images
+    into one composite region first means one caption assignment, and
+    save_images renders the merged region as a single rasterized image
+    instead of trying to reassemble N separately-encoded layers.
+    """
+    def intersects(a: Rect, b: Rect) -> bool:
+        return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+
+    # Union-find: a complex illustration can be tiled from a hundred-plus
+    # tiny raster pieces (one real case hit 152 on a single page), and
+    # restarting an O(n^2) pairwise scan from the top after every single
+    # merge -- the previous approach -- degrades badly at that size. This
+    # does the same O(n^2) intersection test but merges in near-constant
+    # time per union, so a pathological page doesn't slow down parsing.
+    n = len(images)
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if intersects(images[i].bbox, images[j].bbox):
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[ri] = rj
+
+    groups: dict[int, list[ImageRef]] = {}
+    for i, im in enumerate(images):
+        groups.setdefault(find(i), []).append(im)
+    return list(groups.values())
 
 
 def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.6) -> list[Region]:
