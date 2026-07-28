@@ -18,12 +18,13 @@ from __future__ import annotations
 
 import json
 import re
+import statistics
 from dataclasses import dataclass, field, asdict
 
 import fitz
 
 from . import arabic
-from .layout import Region, assign_spans, order_regions, propose_regions
+from .layout import Region, assign_spans, group_by_line, order_regions, propose_regions
 from .primitives import PagePrimitives, Span, containment, extract_page, style_profile
 
 DIGITS = re.compile(r"^[\s\u0660-\u0669\u06F0-\u06F90-9]{1,3}$")
@@ -45,6 +46,9 @@ class Block:
     # image bytes back out of the PDF (see save_images). Before save_images
     # runs, `text` holds the geometrically-nearest caption, if any was found.
     image_xref: int | None = None
+    # populated only for role == "table": the raw (row, col) text grid, so
+    # to_html can emit a real <table> without re-parsing markdown pipes.
+    table_grid: list[list[str]] | None = None
 
 
 @dataclass
@@ -92,14 +96,10 @@ def _region_text(region: Region, opts: arabic.NormalizeOptions) -> tuple[str, di
     """Fallback path: join spans into logical lines, then repair each line."""
     if not region.spans:
         return "", {}
-    lines: dict[int, list[Span]] = {}
-    for s in region.spans:
-        key = round(((s.bbox[1] + s.bbox[3]) / 2) / max(s.size * 0.55, 1))
-        lines.setdefault(key, []).append(s)
+    lines = group_by_line(region.spans)
 
     out, diags = [], {"reversed_lines": 0, "presentation_forms": 0}
-    for key in sorted(lines):
-        row = lines[key]
+    for row in lines:
         rtl = any(arabic.is_arabic(s.text) for s in row)
         row.sort(key=lambda s: -s.bbox[0] if rtl else s.bbox[0])
         raw = " ".join(s.text for s in row)
@@ -111,13 +111,15 @@ def _region_text(region: Region, opts: arabic.NormalizeOptions) -> tuple[str, di
     return "\n".join(out), diags
 
 
-def _table_text(region: Region, owned: dict[int, list], opts: arabic.NormalizeOptions) -> tuple[str, dict]:
-    """Render a detected table grid (see layout.detect_tables) as a GFM
-    markdown table, one cell per (row, col) position. Cell text still goes
-    through the same geometry-first bidi/repair path as everything else --
-    only the grid layout itself comes from the vector rules."""
+def _table_grid(region: Region, owned: dict[int, list],
+                opts: arabic.NormalizeOptions) -> tuple[list[list[str]], dict]:
+    """Build the raw (row, col) text grid for a detected table (see
+    layout.detect_tables). Cell text goes through the same geometry-first
+    bidi/repair path as everything else -- only the grid layout itself comes
+    from the vector rules. Shared by both the markdown and HTML renderers so
+    neither has to re-parse the other's output to get the cells back."""
     if not region.cells:
-        return "", {}
+        return [], {}
     nrows = max(c.table_row for c in region.cells) + 1
     ncols = max(c.table_col for c in region.cells) + 1
     grid = [["" for _ in range(ncols)] for _ in range(nrows)]
@@ -132,7 +134,7 @@ def _table_text(region: Region, owned: dict[int, list], opts: arabic.NormalizeOp
             text, d = _region_text(cell, opts)
         diags["reversed_lines"] += d.get("reversed_lines", 0)
         diags["presentation_forms"] += d.get("presentation_forms", 0)
-        grid[cell.table_row][cell.table_col] = text.replace("\n", "<br>").replace("|", "/").strip()
+        grid[cell.table_row][cell.table_col] = text.strip()
 
     # Drop wholly-empty rows and columns. Borderless-table column/row
     # boundaries are inferred from alignment, so a slightly-misplaced split can
@@ -141,16 +143,25 @@ def _table_text(region: Region, owned: dict[int, list], opts: arabic.NormalizeOp
     keep_cols = [ci for ci in range(ncols) if any(grid[ri][ci] for ri in range(nrows))]
     keep_rows = [ri for ri in range(nrows) if any(grid[ri][ci] for ci in range(ncols))]
     if not keep_cols or not keep_rows:
-        return "", diags
-    grid = [[grid[ri][ci] for ci in keep_cols] for ri in keep_rows]
-    ncols = len(keep_cols)
+        return [], diags
+    return [[grid[ri][ci] for ci in keep_cols] for ri in keep_rows], diags
 
+
+def _table_text(region: Region, owned: dict[int, list], opts: arabic.NormalizeOptions) -> tuple[str, dict, list]:
+    """Render a detected table as a GFM markdown table. Returns (markdown,
+    diagnostics, grid) -- the grid is exposed so to_html can build a real
+    <table> instead of re-parsing markdown pipes back into cells."""
+    grid, diags = _table_grid(region, owned, opts)
+    if not grid:
+        return "", diags, grid
+    ncols = len(grid[0])
     lines = []
     for ri, row in enumerate(grid):
-        lines.append("| " + " | ".join(row) + " |")
+        cells = [c.replace("\n", "<br>").replace("|", "/") for c in row]
+        lines.append("| " + " | ".join(cells) + " |")
         if ri == 0:
             lines.append("|" + "|".join(["---"] * ncols) + "|")
-    return "\n".join(lines), diags
+    return "\n".join(lines), diags, grid
 
 
 def _dominant_style(region: Region) -> str | None:
@@ -169,12 +180,17 @@ def _fallback_role(region: Region, page: PagePrimitives) -> str:
         return "figure"
     if region.kind == "chip":
         return "activity_marker"
-    sizes = [s.size for s in region.spans] or [10]
-    biggest = max(sizes)
+    # Dominant size (char-weighted median), not the single biggest span: a
+    # region that's mostly body paragraph text with one bigger banner/label
+    # span inside it (a "Learning Objectives" title over its own bullet list,
+    # say) is still a passage -- one big span shouldn't out-vote the bulk of
+    # the region's actual content and mislabel the whole thing as a heading.
+    weighted = [s.size for s in region.spans for _ in range(max(len(s.text.strip()), 1))] or [10]
+    dominant = statistics.median(weighted)
     body = sorted(s.size for s in page.spans)[len(page.spans) // 2] if page.spans else 10
     if region.kind == "panel":
-        return "heading" if biggest > body * 1.25 else "passage"
-    if biggest > body * 1.35:
+        return "heading" if dominant > body * 1.25 else "passage"
+    if dominant > body * 1.35:
         return "heading"
     if len(region.spans) <= 2 and (region.bbox[3] > page.height * 0.93):
         return "page_furniture"
@@ -332,8 +348,9 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     # table cell grid is authoritative.
     quality: dict[int, int] = {}
     for r in regions:
+        grid = None
         if r.kind == "table":
-            text, diag = _table_text(r, owned, opts)
+            text, diag, grid = _table_text(r, owned, opts)
             q = 3
         elif geo_lines:
             text, diag = _region_text_geo(r, owned.get(id(r), []), opts)
@@ -350,7 +367,7 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
             continue
         block = Block(role=role, text=text, bbox=tuple(round(v, 1) for v in r.bbox),
                       order=r.order or 0, column=r.column, activity=r.activity,
-                      style=style, diagnostics=diag, image_xref=r.image_xref)
+                      style=style, diagnostics=diag, image_xref=r.image_xref, table_grid=grid)
         result.blocks.append(block)
         quality[id(block)] = q
 
@@ -463,6 +480,155 @@ def to_markdown(result: PageResult) -> str:
             lines.append(f"{b.text} {tag}".strip())
         lines.append("")
     return "\n".join(lines)
+
+
+_MD_IMAGE = re.compile(r"^!\[(.*)\]\((.*)\)$", re.S)
+
+
+def _dir_attr(text: str) -> str:
+    """`dir="rtl"` for predominantly-Arabic text, nothing for LTR -- so mixed
+    Arabic/English books render each block in its own correct direction
+    instead of one direction being forced on the whole page."""
+    return ' dir="rtl"' if arabic.is_arabic(text) else ""
+
+
+def _heading_levels(result: PageResult) -> dict[int, int]:
+    """Rank heading blocks by font size into h1-h4, largest first. Best-effort:
+    without a style map this is the only per-page signal available, but it's
+    enough to give a page real structure instead of every heading flattening
+    to the same tag regardless of size."""
+    sizes: dict[int, float] = {}
+    for b in result.blocks:
+        if b.role != "heading" or not b.style:
+            continue
+        m = re.match(r"^.*\|([0-9.]+)\|", b.style)
+        if m:
+            sizes[id(b)] = float(m.group(1))
+    ranked = sorted(set(sizes.values()), reverse=True)
+    return {bid: min(ranked.index(sz) + 1, 4) for bid, sz in sizes.items()}
+
+
+def to_html(result: PageResult) -> str:
+    """Render one page as an HTML fragment: real <table>, <img>/<figure> for
+    images, leveled headings, direction-aware paragraphs. Meant to be dropped
+    into the <body> of a page shell (see cli.py's --html output), not a full
+    document on its own -- so it composes into a single combined file too.
+    """
+    import html as _html
+
+    levels = _heading_levels(result)
+    out = [f'<section class="page" id="page-{result.page}" data-page="{result.page}">']
+    for b in result.blocks:
+        tag_attr = f' data-activity="{b.activity}"' if b.activity is not None else ""
+
+        if b.role == "figure":
+            m = _MD_IMAGE.match(b.text) if b.text else None
+            if m:
+                alt, src = _html.escape(m.group(1)), _html.escape(m.group(2))
+                out.append(f'<figure{tag_attr}><img src="{src}" alt="{alt}" loading="lazy">'
+                          f'<figcaption>{alt}</figcaption></figure>')
+            elif b.text:
+                out.append(f'<div class="figure-placeholder"{tag_attr}>[image: {_html.escape(b.text)}]</div>')
+            else:
+                out.append(f'<div class="figure-placeholder"{tag_attr}>[image]</div>')
+            continue
+
+        if not b.text:
+            continue
+
+        if b.role == "table" and b.table_grid:
+            rows = ["<table>"]
+            for ri, row in enumerate(b.table_grid):
+                cell_tag = "th" if ri == 0 else "td"
+                cells = "".join(f"<{cell_tag}{_dir_attr(c)}>{_html.escape(c)}</{cell_tag}>" for c in row)
+                rows.append(f"<tr>{cells}</tr>")
+            rows.append("</table>")
+            out.append(f'<div class="table-wrap"{tag_attr}>{"".join(rows)}</div>')
+        elif b.role == "heading":
+            level = levels.get(id(b), 2)
+            out.append(f'<h{level}{_dir_attr(b.text)}{tag_attr}>{_html.escape(b.text)}</h{level}>')
+        elif b.role == "activity_marker":
+            out.append(f'<h3 class="activity-marker"{tag_attr}>{_html.escape(b.text)}</h3>')
+        elif b.role == "passage":
+            paras = "".join(f"<p>{_html.escape(p)}</p>" for p in b.text.split("\n") if p.strip())
+            out.append(f'<blockquote{_dir_attr(b.text)}{tag_attr}>{paras}</blockquote>')
+        else:
+            paras = "".join(f"<p>{_html.escape(p)}</p>" for p in b.text.split("\n") if p.strip())
+            out.append(f'<div class="{b.role}"{_dir_attr(b.text)}{tag_attr}>{paras}</div>')
+    out.append("</section>")
+    return "\n".join(out)
+
+
+_HTML_SHELL = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<link rel="stylesheet" href="{css_href}">
+</head>
+<body>
+{nav}
+{content}
+{nav}
+</body>
+</html>
+"""
+
+_DEFAULT_CSS = """
+body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 900px;
+      margin: 0 auto; padding: 1.5rem; line-height: 1.55; color: #1b1b1b; background: #fff; }
+.page { border-bottom: 1px solid #ddd; padding-bottom: 2rem; margin-bottom: 2rem; }
+.page::before { content: "Page " attr(data-page); display: block; font-size: 0.8rem;
+                color: #888; margin-bottom: 0.75rem; }
+h1, h2, h3, h4 { color: #0d3b66; line-height: 1.25; }
+h1 { font-size: 1.6rem; } h2 { font-size: 1.3rem; } h3 { font-size: 1.1rem; } h4 { font-size: 1rem; }
+.activity-marker { color: #b5471b; }
+blockquote { border-inline-start: 4px solid #0d3b66; margin: 1rem 0; padding: 0.25rem 1rem;
+            background: #f4f8fb; }
+p { margin: 0.6rem 0; }
+figure { margin: 1.2rem 0; text-align: center; }
+figure img { max-width: 100%; height: auto; border: 1px solid #eee; }
+figcaption { font-size: 0.85rem; color: #555; margin-top: 0.35rem; }
+.figure-placeholder { padding: 0.75rem; background: #f3f3f3; color: #777; font-style: italic;
+                      text-align: center; margin: 1rem 0; }
+.table-wrap { overflow-x: auto; margin: 1.2rem 0; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #ccc; padding: 0.4rem 0.6rem; text-align: start; font-size: 0.92rem; }
+th { background: #f0f4f8; }
+[dir="rtl"] { text-align: right; }
+nav.page-nav { display: flex; justify-content: space-between; font-size: 0.9rem; margin: 1rem 0; }
+nav.page-nav a { color: #0d3b66; text-decoration: none; }
+"""
+
+
+def save_html(results: list[PageResult], out_dir: str, css_href: str = "styles.css",
+             title_prefix: str = "Page") -> list[str]:
+    """Write one HTML file per page plus a shared stylesheet and an index.
+    Returns the list of written page filenames."""
+    import os
+
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "styles.css"), "w") as f:
+        f.write(_DEFAULT_CSS)
+
+    names = [f"page_{r.page:04d}.html" for r in results]
+    for i, r in enumerate(results):
+        prev = f'<a href="{names[i-1]}">&larr; prev</a>' if i > 0 else "<span></span>"
+        nxt = f'<a href="{names[i+1]}">next &rarr;</a>' if i < len(results) - 1 else "<span></span>"
+        nav = f'<nav class="page-nav">{prev}<a href="index.html">index</a>{nxt}</nav>'
+        html_doc = _HTML_SHELL.format(title=f"{title_prefix} {r.page}", css_href=css_href,
+                                      nav=nav, content=to_html(r))
+        with open(os.path.join(out_dir, names[i]), "w") as f:
+            f.write(html_doc)
+
+    index_items = "".join(f'<li><a href="{n}">{title_prefix} {r.page}</a></li>'
+                          for n, r in zip(names, results))
+    index_html = _HTML_SHELL.format(title=f"{title_prefix}s", css_href=css_href,
+                                    nav="", content=f"<h1>{title_prefix}s</h1><ol>{index_items}</ol>")
+    with open(os.path.join(out_dir, "index.html"), "w") as f:
+        f.write(index_html)
+    return names
 
 
 def to_json(results: list[PageResult]) -> str:

@@ -18,6 +18,7 @@ def main(argv=None):
 
     p = sub.add_parser("parse"); p.add_argument("pdf"); p.add_argument("--pages")
     p.add_argument("--style-map"); p.add_argument("--json"); p.add_argument("--md")
+    p.add_argument("--html", help="write one HTML page per PDF page, plus styles.css and index.html")
     p.add_argument("--no-geo", action="store_true")
     p.add_argument("--strip-harakat", action="store_true")
 
@@ -46,7 +47,7 @@ def main(argv=None):
     if args.cmd == "audit":
         print(json.dumps(pipeline.audit(results), ensure_ascii=False, indent=2)); return
 
-    img_dir = args.md or (os.path.dirname(args.json) if args.json else None)
+    img_dir = args.html or args.md or (os.path.dirname(args.json) if args.json else None)
     if img_dir:
         n = pipeline.save_images(doc, results, os.path.join(img_dir, "images"))
         if n:
@@ -60,7 +61,11 @@ def main(argv=None):
         for r in results:
             open(os.path.join(args.md, f"page_{r.page:04d}.md"),"w").write(pipeline.to_markdown(r))
         print(f"markdown -> {args.md}/")
-    if not args.json and not args.md:
+    if args.html:
+        title = os.path.splitext(os.path.basename(args.pdf))[0]
+        pipeline.save_html(results, args.html, title_prefix=title)
+        print(f"html -> {args.html}/ ({len(results)} pages, index.html)")
+    if not args.json and not args.md and not args.html:
         for r in results: print(pipeline.to_markdown(r))
 
 if __name__ == "__main__":

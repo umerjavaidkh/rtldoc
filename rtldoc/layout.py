@@ -130,8 +130,29 @@ def detect_tables(prim: PagePrimitives, min_rows: int = 2, min_cols: int = 2,
     if span_x <= 0 or span_y <= 0:
         return []
 
-    row_ys = {round(y) for y, x0, x1 in hlines if (x1 - x0) >= coverage * span_x}
-    col_xs = {round(x) for x, y0, y1 in vlines if (y1 - y0) >= coverage * span_y}
+    row_lines = [(y, x0, x1) for y, x0, x1 in hlines if (x1 - x0) >= coverage * span_x]
+    col_lines = [(x, y0, y1) for x, y0, y1 in vlines if (y1 - y0) >= coverage * span_y]
+
+    # Consistency guard: a real table's rows all span roughly the same
+    # left/right extent (they're borders of the SAME table), and its columns
+    # all span roughly the same top/bottom extent. Two unrelated decorative
+    # rules -- an "Example" sidebar bar and a different equation's fraction
+    # underline, say -- can each individually pass the coverage check above
+    # while sharing no real relationship; requiring them to actually line up
+    # is what tells a genuine grid apart from that kind of coincidence.
+    def _consistent(lines: list[tuple[float, float, float]], span: float, tol_frac: float = 0.15) -> bool:
+        if len(lines) <= 1:
+            return True
+        los = [a for _, a, _ in lines]
+        his = [b for _, _, b in lines]
+        tol = tol_frac * span
+        return (max(los) - min(los)) <= tol and (max(his) - min(his)) <= tol
+
+    if not _consistent(row_lines, span_x) or not _consistent(col_lines, span_y):
+        return []
+
+    row_ys = {round(y) for y, _, _ in row_lines}
+    col_xs = {round(x) for x, _, _ in col_lines}
     # a table's outer frame is sometimes implied only by the perpendicular
     # rules (no drawn top/bottom border, as on this book's tables) -- fold
     # those extremes in as the missing boundary.
@@ -154,13 +175,40 @@ def detect_tables(prim: PagePrimitives, min_rows: int = 2, min_cols: int = 2,
     return [table]
 
 
-def _group_lines(spans: list[Span]) -> list[list[Span]]:
-    """Group spans into visual lines by baseline, returned top-to-bottom."""
-    lines: dict[int, list[Span]] = {}
-    for s in spans:
-        key = round(((s.bbox[1] + s.bbox[3]) / 2) / max(s.size * 0.5, 1.0))
-        lines.setdefault(key, []).append(s)
-    return [lines[k] for k in sorted(lines)]
+def group_by_line(spans: list[Span], tol_frac: float = 0.5) -> list[list[Span]]:
+    """Group spans into visual lines by baseline proximity, top-to-bottom.
+
+    Deliberately sequential-interval, not a hashed bucket key. A bucket key
+    of the form round(y / (own_size * factor)) makes the bucket WIDTH scale
+    with each span's own font size -- which means a large-font line and a
+    small-font line far apart on the page can round to the exact same
+    integer key by pure arithmetic coincidence (a 17pt heading at y=220 and
+    a 9.5pt body line at y=126 hashing to the same bucket is a real case
+    this caught, not a hypothetical one). That silently merges two unrelated
+    lines into one before any paragraph-level logic even runs, and no
+    downstream size/gap check can undo it because the merge already
+    happened. Proximity to the line's own running position, gated by a
+    tolerance no wider than the smaller of the two font sizes involved,
+    can't alias that way.
+    """
+    if not spans:
+        return []
+    ordered = sorted(spans, key=lambda s: (s.bbox[1] + s.bbox[3]) / 2)
+    lines: list[list[Span]] = []
+    line_yc: list[float] = []
+    for s in ordered:
+        yc = (s.bbox[1] + s.bbox[3]) / 2
+        if lines:
+            last_yc = line_yc[-1]
+            last_size = max(m.size for m in lines[-1])
+            tol = max(min(last_size, s.size) * tol_frac, 1.0)
+            if abs(yc - last_yc) <= tol:
+                lines[-1].append(s)
+                line_yc[-1] = sum((m.bbox[1] + m.bbox[3]) / 2 for m in lines[-1]) / len(lines[-1])
+                continue
+        lines.append([s])
+        line_yc.append(yc)
+    return lines
 
 
 def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: int = 3,
@@ -179,7 +227,7 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
     keeping only those an alignment supports across >= min_rows rows. Long
     (prose) spans never vote, so a wrapped sentence can't invent a column.
     """
-    lines = _group_lines(prim.spans)
+    lines = group_by_line(prim.spans)
     if len(lines) < min_rows:
         return []
 
@@ -390,32 +438,37 @@ def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.
     return [r for r in regions if r.spans or r.kind in ("figure", "table")]
 
 
-def _cluster_flow(spans: list[Span], gap_mult: float = 1.6) -> list[Region]:
+def _cluster_flow(spans: list[Span], gap_mult: float = 1.6, size_ratio: float = 1.3) -> list[Region]:
     """Greedy line-then-paragraph clustering for text outside any drawn box."""
     if not spans:
         return []
-    lines: dict[int, list[Span]] = {}
-    for s in spans:
-        key = round(((s.bbox[1] + s.bbox[3]) / 2) / max(s.size * 0.6, 1))
-        lines.setdefault(key, []).append(s)
-
-    ordered = sorted(lines.values(), key=lambda ls: min(s.bbox[1] for s in ls))
+    ordered = group_by_line(spans)
+    ordered.sort(key=lambda ls: min(s.bbox[1] for s in ls))
     heights = [np.median([s.bbox[3] - s.bbox[1] for s in ls]) for ls in ordered]
     lead = float(np.median(heights)) if heights else 10.0
+    sizes = [float(np.median([s.size for s in ls])) for ls in ordered]
 
     groups: list[list[Span]] = []
     prev_bottom = None
     prev_xrange = None
-    for ls in ordered:
+    prev_size = None
+    for ls, size in zip(ordered, sizes):
         top = min(s.bbox[1] for s in ls)
         x0, x1 = min(s.bbox[0] for s in ls), max(s.bbox[2] for s in ls)
         overlaps = prev_xrange is not None and not (x1 < prev_xrange[0] or x0 > prev_xrange[1])
-        if groups and prev_bottom is not None and (top - prev_bottom) < lead * gap_mult and overlaps:
+        # A font-size jump is a semantic break in its own right, independent of
+        # whitespace: a heading immediately following body text with only
+        # ordinary paragraph spacing above it would otherwise merge into one
+        # blob purely because the gap check passed, and the whole thing then
+        # gets mis-typed by whatever the biggest span in it happens to be.
+        same_size = prev_size is None or max(size, prev_size) / min(size, prev_size) <= size_ratio
+        if groups and prev_bottom is not None and (top - prev_bottom) < lead * gap_mult and overlaps and same_size:
             groups[-1].extend(ls)
         else:
             groups.append(list(ls))
         prev_bottom = max(s.bbox[3] for s in ls)
         prev_xrange = (x0, x1)
+        prev_size = size
 
     out = []
     for g in groups:
