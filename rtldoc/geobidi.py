@@ -113,17 +113,37 @@ def group_baselines(glyphs: list[Glyph], tol_frac: float = 0.45,
     weaving the two columns' characters together mid-word. A real column
     gutter is many times wider than a normal inter-word space, which is what
     this split catches without needing any column detection of its own.
+
+    Deliberately sequential-interval, not a hashed bucket key (round(g.y /
+    (g.size * tol_frac))). Bucket width scaling with each glyph's own font
+    size lets two genuinely different rows hash-collide by pure arithmetic
+    coincidence -- confirmed real case: an 8pt column-year header ("2017") at
+    y=163 and a 10pt data row ("$ 40,653") at y=204.5, 41.5pt apart, both
+    rounded to key=45, merging into one "baseline" and interleaving their
+    digits character-by-character ("2017" + "40,653" -> "24001,7653") once
+    sorted by x. Same class of bug as layout.group_by_line's fix; this is
+    the sibling implementation that hadn't gotten it yet.
     """
     if not glyphs:
         return []
-    lines: dict[int, list[Glyph]] = {}
-    for g in glyphs:
-        key = round(g.y / max(g.size * tol_frac, 1.0))
-        lines.setdefault(key, []).append(g)
+    ordered = sorted(glyphs, key=lambda g: g.y)
+    lines: list[list[Glyph]] = []
+    line_y: list[float] = []
+    for g in ordered:
+        if lines:
+            last_y = line_y[-1]
+            last_size = max(m.size for m in lines[-1])
+            tol = max(min(last_size, g.size) * tol_frac, 1.0)
+            if abs(g.y - last_y) <= tol:
+                lines[-1].append(g)
+                line_y[-1] = sum(m.y for m in lines[-1]) / len(lines[-1])
+                continue
+        lines.append([g])
+        line_y.append(g.y)
 
     out: list[list[Glyph]] = []
-    for key in sorted(lines):
-        ln = sorted(lines[key], key=lambda g: g.x0)
+    for ln in lines:
+        ln = sorted(ln, key=lambda g: g.x0)
         cluster = [ln[0]]
         for prev, g in zip(ln, ln[1:]):
             if g.x0 - prev.x1 > max(prev.size, g.size) * col_gap_mult:

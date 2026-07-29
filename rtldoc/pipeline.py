@@ -28,6 +28,11 @@ from .layout import Region, assign_spans, group_by_line, order_regions, propose_
 from .primitives import PagePrimitives, Span, containment, extract_page, style_profile
 
 DIGITS = re.compile(r"^[\s\u0660-\u0669\u06F0-\u06F90-9]{1,3}$")
+# A bare list marker as its own line (see layout._starts_with_list_marker,
+# which splits these into their own block precisely because the marker
+# starts a new item). Reused here at render time to show "<marker> text" as
+# one list item instead of the marker sitting alone on its own line.
+_LIST_MARKER_LINE = re.compile(r"^[\u2022\u2023\u25E6\u25CF\u25CB\u25AA\u25AB\u2219\u00B7oO*\-\u2013\u2014]$|^\(?[0-9]{1,3}[.)]$|^\(?[a-zA-Z][.)]$")
 
 DEFAULT_STYLE_MAP: dict[str, str] = {}   # style_key -> role, supplied per series
 
@@ -513,7 +518,11 @@ def to_markdown(result: PageResult) -> str:
         elif b.role == "passage":
             lines.append(f"> {b.text.replace(chr(10), chr(10) + '> ')} {tag}".strip())
         else:
-            lines.append(f"{b.text} {tag}".strip())
+            item_text = _list_item_text(b.text)
+            if item_text is not None:
+                lines.append(f"- {item_text} {tag}".strip())
+            else:
+                lines.append(f"{b.text} {tag}".strip())
         lines.append("")
     return "\n".join(lines)
 
@@ -526,6 +535,19 @@ def _dir_attr(text: str) -> str:
     Arabic/English books render each block in its own correct direction
     instead of one direction being forced on the whole page."""
     return ' dir="rtl"' if arabic.is_arabic(text) else ""
+
+
+def _list_item_text(text: str) -> str | None:
+    """If `text` opens with a bare list marker on its own line (see
+    layout._starts_with_list_marker, which splits a hanging-indent list
+    item into its own block for exactly this reason), return the item's
+    text with the marker line dropped and its wrapped lines rejoined into
+    one flowing line -- otherwise None.
+    """
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    if len(lines) < 2 or not _LIST_MARKER_LINE.match(lines[0].strip()):
+        return None
+    return " ".join(lines[1:])
 
 
 def _heading_levels(result: PageResult) -> dict[int, int]:
@@ -554,8 +576,26 @@ def to_html(result: PageResult) -> str:
 
     levels = _heading_levels(result)
     out = [f'<section class="page" id="page-{result.page}" data-page="{result.page}">']
+    in_list = False
     for b in result.blocks:
         tag_attr = f' data-activity="{b.activity}"' if b.activity is not None else ""
+
+        # A hanging-indent list item (see layout._starts_with_list_marker)
+        # renders as a real <li>, marker dropped and wrapped lines rejoined
+        # into one line -- consecutive items share one <ul> instead of each
+        # showing its bullet stranded above its own text.
+        item_text = None
+        if b.text and b.role not in ("figure", "table", "heading", "activity_marker"):
+            item_text = _list_item_text(b.text)
+        if item_text is None and in_list:
+            out.append("</ul>")
+            in_list = False
+        if item_text is not None:
+            if not in_list:
+                out.append(f'<ul{_dir_attr(b.text)}>')
+                in_list = True
+            out.append(f'<li{tag_attr}>{_html.escape(item_text)}</li>')
+            continue
 
         if b.role == "figure":
             m = _MD_IMAGE.match(b.text) if b.text else None
@@ -591,6 +631,8 @@ def to_html(result: PageResult) -> str:
         else:
             paras = "".join(f"<p>{_html.escape(p)}</p>" for p in b.text.split("\n") if p.strip())
             out.append(f'<div class="{b.role}"{_dir_attr(b.text)}{tag_attr}>{paras}</div>')
+    if in_list:
+        out.append("</ul>")
     out.append("</section>")
     return "\n".join(out)
 

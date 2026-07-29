@@ -566,6 +566,32 @@ def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.
     return [r for r in regions if r.spans or r.kind in ("figure", "table")]
 
 
+_LIST_MARKER_RE = re.compile(r"^[•‣◦●○▪▫∙·oO*\-–—]$|^\(?[0-9]{1,3}[.)]$|^\(?[a-zA-Z][.)]$")
+
+
+def _starts_with_list_marker(ls: list[Span], gap_ratio: float = 2.0) -> bool:
+    """Does this line open with an isolated bullet/number marker?
+
+    A hanging-indent list item's marker sits far enough left of the body
+    text that the gap between them is much wider than an ordinary
+    inter-word space (confirmed: ~35pt marker-to-text gap vs ~2.5pt normal
+    word spacing on the page that surfaced this) -- checking the gap
+    relative to font size, not an absolute distance, is what keeps this
+    general across font sizes/documents. Marker glyph identity (bullet
+    dot, "1.", "a)") is checked too so an ordinary short word followed by
+    a wide gap (rare, but possible before a right-aligned figure) isn't
+    mistaken for one.
+    """
+    if len(ls) < 2:
+        return False
+    by_x = sorted(ls, key=lambda s: s.bbox[0])
+    first, second = by_x[0], by_x[1]
+    if not _LIST_MARKER_RE.match(first.text.strip()):
+        return False
+    gap = second.bbox[0] - first.bbox[2]
+    return gap > first.size * gap_ratio
+
+
 def _cluster_flow(spans: list[Span], gap_mult: float = 1.6, size_ratio: float = 1.3) -> list[Region]:
     """Greedy line-then-paragraph clustering for text outside any drawn box."""
     if not spans:
@@ -590,7 +616,15 @@ def _cluster_flow(spans: list[Span], gap_mult: float = 1.6, size_ratio: float = 
         # blob purely because the gap check passed, and the whole thing then
         # gets mis-typed by whatever the biggest span in it happens to be.
         same_size = prev_size is None or max(size, prev_size) / min(size, prev_size) <= size_ratio
-        if groups and prev_bottom is not None and (top - prev_bottom) < lead * gap_mult and overlaps and same_size:
+        # A hanging-indent list marker (bullet, "1.", "a)") starting a line is
+        # a new-item signal in its own right, independent of vertical gap: a
+        # list's inter-item spacing is often barely larger than its intra-
+        # paragraph line spacing (confirmed: 17.5pt actual gap vs a 17.6pt
+        # threshold from line-height alone), so the gap check by itself can
+        # merge two distinct items by a hair. A leading marker always starts
+        # a new item regardless of how tight that gap happens to be.
+        new_item = _starts_with_list_marker(ls)
+        if groups and prev_bottom is not None and (top - prev_bottom) < lead * gap_mult and overlaps and same_size and not new_item:
             groups[-1].extend(ls)
         else:
             groups.append(list(ls))
@@ -611,7 +645,7 @@ def _cluster_flow(spans: list[Span], gap_mult: float = 1.6, size_ratio: float = 
 # ---------------------------------------------------------------------------
 
 def _column_boundaries(bboxes: list[Rect], page_width: float, page_height: float,
-                       min_gap: float = 10.0, max_width_frac: float = 0.6,
+                       min_gap: float = 10.0, max_width_frac: float = 0.92,
                        empty_thresh: float = 0.04) -> list[float]:
     """2D-aware whitespace-gutter finder.
 
@@ -635,12 +669,34 @@ def _column_boundaries(bboxes: list[Rect], page_width: float, page_height: float
     merely somewhere in it: that persistence is what a real inter-column
     gutter has and a local indent does not.
 
-    Bboxes wider than `max_width_frac` of the page are additionally excluded
-    from the emptiness measurement (though still assigned a column
-    afterwards) -- otherwise one full-width line still poisons every column
-    it happens to cross, persistence check or not.
+    Bboxes wider than `max_width_frac` of the *detected content width* (not
+    the raw page width -- confirmed bug: an ordinary single-column business
+    filing has body lines occupying ~90% of the raw page width once normal
+    margins are accounted for, so a page-width-relative threshold excluded
+    literally every real text line, leaving only a bullet column and a
+    stray page-number to define "columns" from noise) are excluded from the
+    emptiness measurement (though still assigned a column afterwards) --
+    otherwise one genuinely full-bleed element (a header, footer, rule
+    spanning the whole content region) still poisons every column it
+    happens to cross, persistence check or not.
+
+    A candidate gap is further rejected unless BOTH sides have at least one
+    contiguous multi-line run of ink (see `max_run` below) -- confirmed bug:
+    a hanging-indent bullet list produces a "column" on the marker side
+    that is persistently empty in the gutter-check sense (same mechanism as
+    a real gutter) since each marker is a single isolated line followed by
+    a paragraph-height gap before the next one, no matter how many list
+    items there are. A genuine second column is running text: it always has
+    at least a few lines stacked back-to-back somewhere. That contiguous
+    multi-line evidence, not mere gap-emptiness, is what actually tells two
+    parallel columns apart from a marker/indent gap.
     """
-    narrow = [b for b in bboxes if (b[2] - b[0]) <= page_width * max_width_frac]
+    if not bboxes:
+        return [0.0, page_width]
+    content_left = min(b[0] for b in bboxes)
+    content_right = max(b[2] for b in bboxes)
+    content_width = max(content_right - content_left, 1.0)
+    narrow = [b for b in bboxes if (b[2] - b[0]) <= content_width * max_width_frac]
     use = narrow if narrow else bboxes
     if not use:
         return [0.0, page_width]
@@ -663,16 +719,47 @@ def _column_boundaries(bboxes: list[Rect], page_width: float, page_height: float
     fill_frac = content.mean(axis=0)
     left, right = inked_cols[0] * xres, inked_cols[-1] * xres
 
+    # A single text line's height in row-bins, used below as the yardstick
+    # for "is there more than one line's worth of stacked content here".
+    line_bins = max(1, round(float(np.median([b[3] - b[1] for b in bboxes])) / yres))
+
+    def max_run(col_lo: int, col_hi: int) -> int:
+        """Longest run of consecutive rows with any ink in [col_lo, col_hi)."""
+        if col_hi <= col_lo:
+            return 0
+        has_ink = content[:, col_lo:col_hi].any(axis=1)
+        best = cur = 0
+        for v in has_ink:
+            cur = cur + 1 if v else 0
+            best = max(best, cur)
+        return best
+
+    # A real second column is running text: multiple lines stack with no
+    # full blank-paragraph gap between them, so somewhere it has a
+    # contiguous ink run spanning several lines. A list marker or indent
+    # column (bullets, item numbers) only ever produces isolated one-line
+    # bursts -- each marker sits alone, followed by the paragraph-height
+    # gap until the next one -- so its longest run tops out around a
+    # single line no matter how many items there are. Requiring >1 line's
+    # worth of contiguous run on *both* sides of a candidate gap is what
+    # actually distinguishes two parallel columns from a marker/indent gap;
+    # emptiness of the gap itself is necessary but not sufficient (a
+    # marker's gap-to-text is empty in exactly the same way a real gutter
+    # is).
+    min_run = max(2, round(line_bins * 1.8))
+
     gaps, run = [], None
     for i in range(inked_cols[0], inked_cols[-1] + 1):
         if fill_frac[i] <= empty_thresh:
             run = i if run is None else run
         elif run is not None:
             if (i - run) * xres >= min_gap:
-                gaps.append((run * xres, i * xres))
+                if max_run(inked_cols[0], run) >= min_run and max_run(i, inked_cols[-1] + 1) >= min_run:
+                    gaps.append((run * xres, i * xres))
             run = None
     if run is not None and (inked_cols[-1] + 1 - run) * xres >= min_gap:
-        gaps.append((run * xres, (inked_cols[-1] + 1) * xres))
+        if max_run(inked_cols[0], run) >= min_run and max_run(inked_cols[-1] + 1, inked_cols[-1] + 1) >= min_run:
+            gaps.append((run * xres, (inked_cols[-1] + 1) * xres))
 
     return [left] + [((a + b) / 2) for a, b in gaps] + [right + xres]
 
