@@ -142,8 +142,58 @@ def _near_white(rgb: tuple[float, float, float], tol: float = 0.04) -> bool:
 _RAWDICT_FLAGS = fitz.TEXTFLAGS_RAWDICT | fitz.TEXT_PRESERVE_LIGATURES
 
 
-def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict, min_samples: int = 5,
-                              space_frac_thresh: float = 0.6) -> dict:
+_SPACE_GLYPH_CACHE_ATTR = "_rtldoc_space_glyphs"
+
+
+def _document_space_glyphs(doc: "fitz.Document", min_samples: int = 5,
+                            space_frac_thresh: float = 0.6) -> frozenset:
+    """Which (font, glyph-id) pairs are, by consensus, a whitespace glyph --
+    tallied across the WHOLE document, not one page, and cached on the
+    document object itself (fitz.Document can't be weakly referenced, so a
+    WeakKeyDictionary cache raises on every lookup; a plain dict keyed by
+    id(doc) risks a stale hit if a garbage-collected Document's id is
+    reused by a later one -- an ordinary attribute on the object side-steps
+    both and is freed automatically with the document).
+
+    A font's ToUnicode corruption is a property of the embedded font itself,
+    consistent across every page that uses it -- so the vote must be too.
+    Tallying per page instead is fragile: confirmed real case, the exact
+    same (font, glyph) pair that reads as whitespace 81% of the time across
+    a whole document dipped to 57% on one specific page purely from small-
+    sample noise (that page happened to have a locally worse ratio), missing
+    a 0.6 per-page threshold that the document-wide signal clears easily.
+    Cached since this is the only part that needs every page's texttrace --
+    expensive to redo per page on a multi-thousand-page document, but a
+    one-time cost per document.
+    """
+    cached = getattr(doc, _SPACE_GLYPH_CACHE_ATTR, None)
+    if cached is not None:
+        return cached
+
+    tallies: dict[tuple[str, int], list[int]] = {}
+    for page in doc:
+        try:
+            trace = page.get_texttrace()
+        except Exception:
+            continue
+        for span in trace:
+            font = span.get("font", "")
+            for code, glyph, _origin, _bbox in span.get("chars", []):
+                key = (font, glyph)
+                t = tallies.setdefault(key, [0, 0])
+                t[1] += 1
+                if chr(code).isspace():
+                    t[0] += 1
+
+    space_glyphs = frozenset(
+        k for k, (sp, tot) in tallies.items()
+        if tot >= min_samples and sp / tot >= space_frac_thresh
+    )
+    setattr(doc, _SPACE_GLYPH_CACHE_ATTR, space_glyphs)
+    return space_glyphs
+
+
+def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
     """Repair space glyphs whose ToUnicode CMap is internally inconsistent.
 
     A glyph ID is a fixed visual shape within one embedded font -- it cannot
@@ -152,51 +202,38 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict, min_samples: int = 5,
     glyph was mapped by its own (corrupt) ToUnicode CMap to a plain space
     most of the time, but to the digit '1' or an en-space in the rest,
     purely depending on which CID subrange the subsetting tool happened to
-    consult -- rendering shows nothing there in every case, but the ~14%
-    minority reading silently injected a literal '1' into the extracted
-    text between nearly every word on the affected pages. Also confirmed on
-    a *different* document with a *different* font ("LiberationSans"),
-    confirming this is a general PDF-authoring-tool defect, not one file's
-    quirk.
+    consult -- rendering shows nothing there in every case, but the minority
+    reading silently injected a literal '1' into the extracted text between
+    nearly every word on the affected pages. Also confirmed on a *different*
+    document with a *different* font ("LiberationSans"), confirming this is
+    a general PDF-authoring-tool defect, not one file's quirk.
 
-    General fix: tally, per (font, glyph-id), how often that glyph's
-    ToUnicode reading is whitespace across the whole page. If a large
-    majority reads as whitespace (the glyph's true identity, established by
-    consensus) but a specific occurrence reads as something else, that
-    occurrence is the corrupted minority -- correct it to a plain space.
-    Requires get_texttrace() (glyph IDs) since rawdict alone only exposes
-    the ToUnicode text, not the underlying glyph identity; occurrences are
+    General fix: a document-wide consensus (see _document_space_glyphs)
+    decides which (font, glyph-id) pairs are genuinely whitespace; any
+    occurrence of one of those pairs that doesn't itself read as whitespace
+    is the corrupted minority and gets corrected to a plain space. Requires
+    get_texttrace() (glyph IDs) since rawdict alone only exposes the
+    ToUnicode text, not the underlying glyph identity; occurrences are
     matched back into `raw` by (font, origin) since both calls resolve the
     same underlying glyph run. A real digit '1' glyph is untouched: it has
-    its own distinct glyph ID with its own (non-whitespace-majority) tally.
+    its own distinct glyph ID with its own (non-whitespace) tally.
     """
     try:
+        doc = page.parent
+        if doc is None:
+            raise ValueError
+        space_glyphs = _document_space_glyphs(doc)
+        if not space_glyphs:
+            return raw
         trace = page.get_texttrace()
     except Exception:
         return raw
 
-    tallies: dict[tuple[str, int], list[int]] = {}
-    occurrences: list[tuple[str, int, tuple[float, float], str]] = []
-    for span in trace:
-        font = span.get("font", "")
-        for code, glyph, origin, _bbox in span.get("chars", []):
-            c = chr(code)
-            key = (font, glyph)
-            t = tallies.setdefault(key, [0, 0])
-            t[1] += 1
-            if c.isspace():
-                t[0] += 1
-            occurrences.append((font, glyph, origin, c))
-
-    space_glyphs = {k for k, (sp, tot) in tallies.items()
-                    if tot >= min_samples and sp / tot >= space_frac_thresh}
-    if not space_glyphs:
-        return raw
-
     bad_positions = {
-        (font, round(origin[0], 1), round(origin[1], 1))
-        for font, glyph, origin, c in occurrences
-        if (font, glyph) in space_glyphs and not c.isspace()
+        (span.get("font", ""), round(origin[0], 1), round(origin[1], 1))
+        for span in trace
+        for code, glyph, origin, _bbox in span.get("chars", [])
+        if (span.get("font", ""), glyph) in space_glyphs and not chr(code).isspace()
     }
     if not bad_positions:
         return raw
