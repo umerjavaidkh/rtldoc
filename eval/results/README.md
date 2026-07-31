@@ -52,9 +52,10 @@ structures. HARD invariants: all zero. Coverage 0.990.
 
 `teds_meta_p83.txt` scores the borderless META 10-K income statement with
 **TEDS** (the PubTabNet/OmniDocBench table metric, implemented in
-`eval/teds.py`): rtldoc **0.319** vs pdfplumber 0.053 vs naive 0.000 — a clear
+`eval/teds.py`): rtldoc **0.503** vs pdfplumber 0.053 vs naive 0.000 — a clear
 win, with the modest absolute number honestly reflecting approximate grid
-geometry (right data, merged rows).
+geometry on wide, multi-level-header tables (right data, occasional row/
+column structure mismatches).
 
 That is the point of label-free universality testing plus one real
 gold-standard metric: it produced both the wins and the limitations.

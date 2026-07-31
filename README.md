@@ -42,7 +42,7 @@ borderless financial statement — where the whole point is a hard table:
 
 | rtldoc | pdfplumber | naive `get_text` |
 |---:|---:|---:|
-| **0.319** | 0.053 | 0.000 |
+| **0.503** | 0.053 | 0.000 |
 
 Everything is reproducible in [`eval/`](eval/) (harnesses, arXiv manifest,
 saved reports).
@@ -77,7 +77,8 @@ plus structured JSON, or a self-contained HTML page per PDF page.
 ## Honest limits
 
 - Borderless-table *grid geometry* is approximate (data lands in the right
-  columns, but rows can merge — that's the 0.319 TEDS, not 1.0).
+  columns, but wide multi-level-header tables can still lose structure —
+  that's the 0.503 TEDS, not 1.0).
 - Scanned / no-text-layer pages are flagged for OCR, not yet parsed inline.
 - Best semantic typing needs a one-time per-publisher style map (~20 min).
 
