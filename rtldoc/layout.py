@@ -706,7 +706,22 @@ def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.
         placed = False
         for t in tables:
             if containment(s.bbox, t.bbox) > thresh:
-                best_cell, best_score = None, thresh
+                # A rowspan-merged label cell is vertically centered across
+                # its N sub-rows, so its own bbox straddles a row boundary
+                # near its center. That center falls squarely inside a
+                # single row when N is odd (the middle row), but sits
+                # almost exactly ON the boundary between two rows when N is
+                # even -- neither individual cell then reaches the general
+                # `thresh` containment, and the whole label was silently
+                # dropped (confirmed real case: a graphic-organizer table
+                # with alternating 2-row and 3-row label groups kept every
+                # 3-row label, "تفاصيل مهمّة", but lost both 2-row ones,
+                # "المقدّمة" and "النهاية", entirely). Once a span is already
+                # confirmed to belong to THIS table, there is no other
+                # reasonable destination for it, so the best-matching cell
+                # wins outright rather than needing to also clear the
+                # stricter region-vs-region threshold.
+                best_cell, best_score = None, 0.0
                 for cell in t.cells:
                     c = containment(s.bbox, cell.bbox)
                     if c > best_score:
