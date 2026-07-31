@@ -215,6 +215,19 @@ def _dedupe_blocks(blocks: list["Block"], quality: dict[int, int], min_len: int 
     reading order. Short lines (< min_len) are ignored -- a bare number or a
     one-word heading can legitimately recur, and removing it would lose real
     content for no benefit.
+
+    Geometric overlap between the two blocks is also required. The failure
+    mode this targets is specifically two overlapping regions disagreeing on
+    ownership of the SAME physical line (rendered once via the geo path,
+    once via a neighbour's span fallback); it says nothing about two
+    unrelated blocks elsewhere on the page that happen to share a phrase.
+    Confirmed real case: a tutorial document repeats an identical error-
+    message template ("createdb: error: connection to server on socket
+    ...") verbatim across three separate examples, far apart vertically
+    with zero bbox overlap -- textual match alone silently deleted the line
+    from two of the three, losing real, correct source content. Requiring
+    overlap keeps the intended ownership-ambiguity fix without touching
+    genuine repeated source text that just happens to read identically.
     """
     per_block_lines: list[list[str] | None] = []
     occ: dict[str, list[tuple[int, int]]] = {}
@@ -229,6 +242,11 @@ def _dedupe_blocks(blocks: list["Block"], quality: dict[int, int], min_len: int 
             if len(key) >= min_len:
                 occ.setdefault(key, []).append((bi, li))
 
+    def _overlaps(a: "Block", b: "Block") -> bool:
+        ax0, ay0, ax1, ay1 = a.bbox
+        bx0, by0, bx1, by1 = b.bbox
+        return not (ax1 <= bx0 or bx1 <= ax0 or ay1 <= by0 or by1 <= ay0)
+
     remove: set[tuple[int, int]] = set()
     for spots in occ.values():
         blocks_involved = {bi for bi, _ in spots}
@@ -236,7 +254,7 @@ def _dedupe_blocks(blocks: list["Block"], quality: dict[int, int], min_len: int 
             continue                      # all in one block -> genuine repeat
         best_bi = max(sorted(blocks_involved), key=lambda bi: quality.get(id(blocks[bi]), 1))
         for bi, li in spots:
-            if bi != best_bi:
+            if bi != best_bi and _overlaps(blocks[bi], blocks[best_bi]):
                 remove.add((bi, li))
 
     if not remove:

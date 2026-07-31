@@ -34,14 +34,17 @@ _CELL_MAX_CHARS = 18
 # The aligned columns of a genuine borderless data table are overwhelmingly
 # these; aligned *words* (Arabic MCQ options, an answer key, a two-column list)
 # are not -- which is the signal that keeps this off text that merely lines up.
-_NUM_CELL = re.compile(r"^[\s$€£¥%()+\-–.,0-9٠-٩۰-۹]+$")
+# An em dash on its own (--, U+2014) is included: it's the standard accounting
+# convention for a zero/nil cell in a financial statement, not prose -- confirmed
+# real case, a diluted-EPS table where every zero cell is a lone "--" character.
+_NUM_CELL = re.compile(r"^[\s$€£¥%()+\-–—.,0-9٠-٩۰-۹]+$")
 
 
 def _is_numeric_cell(t: str) -> bool:
     t = t.strip()
     if not t or not _NUM_CELL.match(t):
         return False
-    return any(ch.isdigit() for ch in t) or t in "$€£¥%"
+    return any(ch.isdigit() for ch in t) or t in "$€£¥%—–-"
 
 RegionKind = Literal["panel", "chip", "figure", "flow", "rule", "table"]
 
@@ -290,6 +293,68 @@ def group_by_line(spans: list[Span], tol_frac: float = 0.5) -> list[list[Span]]:
     return lines
 
 
+def _merge_wrapped_label_rows(row_lines: list[list[Span]], centers: list[float],
+                              tol: float, indent_ratio: float = 1.8) -> list[list[list[Span]]]:
+    """Merge a row label's wrapped continuation lines into its data row.
+
+    A borderless table's row_lines are one physical text line each, but a
+    long row label routinely wraps across 2-3 lines while its numbers sit on
+    only one of them -- left unmerged, each wrapped line becomes its own
+    spurious output row with the label disconnected from its data
+    (confirmed real case: "Interest and other income" / "(expense), net"
+    came out as two separate table rows instead of one).
+
+    Two signals distinguish a genuine wrap from a new row starting (a
+    section header like "Costs and expenses:" immediately followed by its
+    first real sub-item, which must NOT merge):
+
+    1. Indentation step. A wrapped continuation line sits at roughly the
+       same left margin as the label's first line (a small hanging-indent
+       bump); a genuine new sub-item is indented a full outline level
+       deeper. Measured relative to the following line's own font size
+       (not a fixed point value) so it holds across documents with
+       different type sizes -- confirmed real case: ~11pt continuation
+       bump vs ~24pt sub-item indent on the same page, a >2x difference.
+    2. Trailing colon. A label ending in ":" is a complete, self-terminating
+       header by typographic convention, never a fragment awaiting more
+       text -- checked even when the indentation alone would look like a
+       continuation (confirmed real case: a 3-line header ending in
+       "common stockholders:" sits at the same indent as the unrelated data
+       row right after it, which must NOT merge in).
+
+    Merging stops the moment a line actually carries an aligned number: that
+    line's data belongs to the row being built, and the row is complete.
+    """
+    def has_data(ln: list[Span]) -> bool:
+        return any(any(abs(s.bbox[2] - cx) <= tol for cx in centers) for s in ln)
+
+    def indent(ln: list[Span]) -> float:
+        return min(s.bbox[0] for s in ln)
+
+    def ends_with_colon(ln: list[Span]) -> bool:
+        return max(ln, key=lambda s: s.bbox[2]).text.strip().endswith(":")
+
+    groups: list[list[list[Span]]] = []
+    i, n = 0, len(row_lines)
+    while i < n:
+        group = [row_lines[i]]
+        base_indent = indent(row_lines[i])
+        j = i
+        while not has_data(row_lines[j]) and not ends_with_colon(row_lines[j]) and j + 1 < n:
+            nxt = row_lines[j + 1]
+            step = indent(nxt) - base_indent
+            avg_size = sum(s.size for s in nxt) / len(nxt)
+            if step > avg_size * indent_ratio:
+                break
+            group.append(nxt)
+            j += 1
+            if has_data(nxt):
+                break
+        groups.append(group)
+        i = j + 1
+    return groups
+
+
 def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: int = 3,
                              tol: float = 6.0, pad: float = 2.0) -> list[Region]:
     """Recover tables that have no drawn rules at all -- financial statements
@@ -347,11 +412,34 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
     if len(tab) < min_rows:
         return []
 
+    def _has_section_break(prev: int, cur_li: int) -> bool:
+        """A colon-terminated PROSE SENTENCE between two tabular rows is a
+        new section's own intro (a new table's caption, not part of this
+        one) and must hard-break a band even within the small gap otherwise
+        tolerated for wrapped labels. A short colon-terminated LABEL
+        ("Revenue:", "Costs and expenses:") is not this -- it's a
+        legitimate divider row *within* the same table (confirmed against
+        gold: it appears as its own row, blank-valued, inside one
+        continuous table) and must not split anything. Word count is what
+        tells them apart: a divider label is a few words; a real section
+        intro is a full sentence (confirmed real case: "Share-based
+        compensation expense included in costs and expenses:" at 9 words,
+        introducing a wholly separate table two lines later, vs "Costs and
+        expenses:" at 3 words, a divider inside the same table)."""
+        for li in range(prev + 1, cur_li):
+            ln = lines[li]
+            if not ln:
+                continue
+            text = " ".join(s.text for s in sorted(ln, key=lambda s: s.bbox[0])).strip()
+            if text.endswith(":") and len(text.split()) >= 6:
+                return True
+        return False
+
     bands: list[list[int]] = []
     run = [tab[0]]
     for prev, cur_li in zip(tab, tab[1:]):
         # allow up to 2 non-tabular lines between (wrapped labels, blank rows)
-        if cur_li - prev <= 3:
+        if cur_li - prev <= 3 and not _has_section_break(prev, cur_li):
             run.append(cur_li)
         else:
             bands.append(run)
@@ -366,7 +454,23 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
         row_lines = lines[lo:hi + 1]                # include wrapped-label rows
         band_spans = [s for ln in row_lines for s in ln]
         # which columns actually appear in this band
-        band_cols = [c for c in real if c["lines"] & set(range(lo, hi + 1))]
+        band_range = set(range(lo, hi + 1))
+        band_cols = [c for c in real if c["lines"] & band_range]
+        # Drop columns whose support *within this band* is weak relative to
+        # the band's strongest column. A wide financial table's real data
+        # columns are hit by nearly every row (confirmed case: 22-24 of 24
+        # rows); a row LABEL's own word can coincidentally right-align across
+        # a handful of rows too (different line items happen to have same-
+        # length wrapped words) and clear the bare min_rows floor without
+        # being a real column at all -- confirmed case: two such noise
+        # columns (support 4 and 6) sat alongside eight genuine columns
+        # (support 22-24) on the same page, inflating a 9-column table to 12
+        # and shifting every row's label into the wrong cell. Relative to
+        # the band's OWN best column, not an absolute count, so this scales
+        # correctly for a small table too.
+        band_support = {id(c): len(c["lines"] & band_range) for c in band_cols}
+        max_support = max(band_support.values(), default=0)
+        band_cols = [c for c in band_cols if band_support[id(c)] >= max(min_rows, max_support * 0.4)]
         if len(band_cols) < min_cols:
             continue
         centers = sorted(sum(c["xs"]) / len(c["xs"]) for c in band_cols)
@@ -389,13 +493,26 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
         # page-credit numbers that merely happen to align leave the grid mostly
         # empty. This rejects a numbered exercise or an image-credits page whose
         # numbers coincidentally line up in >= min_cols places.
+        #
+        # The denominator counts only *tabular* lines (hits >= min_cols), not
+        # every line in row_lines -- row_lines deliberately also includes
+        # wrapped-label filler lines (the band-forming step above allows up
+        # to 3 non-tabular lines through so a 2-line row label doesn't split
+        # the table), and those filler lines are never supposed to have any
+        # aligned numbers. Counting them against the grid double-penalizes
+        # exactly the rows the band logic already agreed to tolerate --
+        # confirmed real case: a diluted-EPS table with many two-line row
+        # labels came out at 0.45 "filled" and was rejected outright, though
+        # every actual data row was completely filled (0.78 once filler
+        # lines are excluded from the count).
+        data_lines = [ln for li, ln in zip(range(lo, hi + 1), row_lines) if hits(li) >= min_cols]
         filled = sum(
             1
-            for ln in row_lines
+            for ln in data_lines
             for cx in centers
             if any(abs(s.bbox[2] - cx) <= tol and len(s.text.strip()) <= _CELL_MAX_CHARS for s in ln)
         )
-        if filled / (len(row_lines) * len(centers)) < 0.5:
+        if not data_lines or filled / (len(data_lines) * len(centers)) < 0.5:
             continue
 
         # each column's left/right extent, from the spans that align to it
@@ -415,7 +532,9 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
             splits.append((extents[j][1] + extents[j + 1][0]) / 2)
         splits.append(extents[-1][1] + pad)
 
-        row_ys = [ (min(s.bbox[1] for s in ln) + max(s.bbox[3] for s in ln)) / 2 for ln in row_lines ]
+        row_groups = _merge_wrapped_label_rows(row_lines, centers, tol)
+        row_ys = [(min(s.bbox[1] for ln in g for s in ln) + max(s.bbox[3] for ln in g for s in ln)) / 2
+                 for g in row_groups]
         rbounds = [min(s.bbox[1] for s in band_spans) - pad]
         for a, b in zip(row_ys, row_ys[1:]):
             rbounds.append((a + b) / 2)

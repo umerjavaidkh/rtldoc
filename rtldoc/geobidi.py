@@ -93,7 +93,19 @@ def glyphs_from_page(page: "fitz.Page", clip: tuple | None = None,
                 size = span["size"]
                 for ch in span.get("chars", []):
                     b = ch["bbox"]
-                    if not ch["c"].strip():
+                    if not ch["c"]:
+                        continue
+                    # A real space character carries its own real advance
+                    # width (confirmed: ~2.5pt wide in this font, same as a
+                    # letter) -- dropping it and re-deriving spacing purely
+                    # from the gap between the surrounding letters is worse
+                    # than using the PDF's own answer, and can silently
+                    # glue words together when that gap is only barely under
+                    # line_to_text's threshold (confirmed real case: a
+                    # 1.9pt measured gap against a 2.0pt threshold on a
+                    # tightly-set font). Only a truly degenerate glyph (a
+                    # zero-width artifact, not real whitespace) is dropped.
+                    if not ch["c"].strip() and (b[2] - b[0]) < 0.1:
                         continue
                     out.append(Glyph(c=ch["c"], x0=b[0], x1=b[2],
                                      y=(b[1] + b[3]) / 2, size=size))
