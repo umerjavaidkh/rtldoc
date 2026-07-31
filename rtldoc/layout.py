@@ -26,6 +26,7 @@ from typing import Literal
 
 import numpy as np
 
+from .arabic import is_arabic
 from .primitives import Fill, ImageRef, PagePrimitives, Rect, Span, containment
 
 # A "cell-like" span: short, so a wrapped prose line never votes for a column.
@@ -753,30 +754,49 @@ def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.
     return [r for r in regions if r.spans or r.kind in ("figure", "table")]
 
 
-_LIST_MARKER_RE = re.compile(r"^[•‣◦●○▪▫∙·oO*\-–—]$|^\(?[0-9]{1,3}[.)]$|^\(?[a-zA-Z][.)]$")
+_LIST_MARKER_RE = re.compile(r"^[•‣◦●○▪▫∙·oO*\-–—]$|^\(?[0-9]{1,3}[.)]?$|^\(?[a-zA-Z][.)]$")
 
 
 def _starts_with_list_marker(ls: list[Span], gap_ratio: float = 2.0) -> bool:
     """Does this line open with an isolated bullet/number marker?
 
-    A hanging-indent list item's marker sits far enough left of the body
-    text that the gap between them is much wider than an ordinary
-    inter-word space (confirmed: ~35pt marker-to-text gap vs ~2.5pt normal
-    word spacing on the page that surfaced this) -- checking the gap
-    relative to font size, not an absolute distance, is what keeps this
-    general across font sizes/documents. Marker glyph identity (bullet
-    dot, "1.", "a)") is checked too so an ordinary short word followed by
-    a wide gap (rare, but possible before a right-aligned figure) isn't
-    mistaken for one.
+    Direction-aware: a line's marker sits at its LEFTMOST span for LTR text
+    but its RIGHTMOST span for RTL text -- reading order runs the opposite
+    way. Checking only the leftmost span (as if every document were LTR)
+    silently never matches a single RTL numbered item; confirmed real case,
+    an Arabic textbook where a numbered marker ("N ." at the line's
+    rightmost position) never registered as a marker at all, so consecutive
+    numbered category headers with only a normal-sized gap between them (no
+    hanging indent) kept merging into one paragraph.
+
+    Two independent signals, either one sufficient:
+    1. A hanging-indent list item's marker sits far enough from the body
+       text that the gap is much wider than an ordinary inter-word space
+       (confirmed: ~35pt marker-to-text gap vs ~2.5pt normal word spacing).
+       Checked relative to font size, not an absolute distance, so it holds
+       across font sizes/documents.
+    2. The line's own label ends in a colon (checked at whichever end of
+       the raw string that logical end lands on, since RTL text is often
+       stored in visual left-to-right order -- the colon can appear as the
+       first character of the string, not the last). A colon-terminated
+       label is a standalone header by convention (see
+       _merge_wrapped_label_rows's identical reasoning) and always starts a
+       new item even sitting directly against its marker with no gap at
+       all -- confirmed real case: RTL numbered category headers, each
+       ending in ':', packed tight against their own marker digit.
     """
     if len(ls) < 2:
         return False
+    rtl = is_arabic(" ".join(s.text for s in ls))
     by_x = sorted(ls, key=lambda s: s.bbox[0])
-    first, second = by_x[0], by_x[1]
+    first, second = (by_x[-1], by_x[-2]) if rtl else (by_x[0], by_x[1])
     if not _LIST_MARKER_RE.match(first.text.strip()):
         return False
-    gap = second.bbox[0] - first.bbox[2]
-    return gap > first.size * gap_ratio
+    gap = (first.bbox[0] - second.bbox[2]) if rtl else (second.bbox[0] - first.bbox[2])
+    if gap > first.size * gap_ratio:
+        return True
+    label = (by_x[0] if rtl else by_x[-1]).text.strip()
+    return bool(label) and (label[0] == ":" or label[-1] == ":")
 
 
 def _cluster_flow(spans: list[Span], gap_mult: float = 1.6, size_ratio: float = 1.3) -> list[Region]:
