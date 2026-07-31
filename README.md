@@ -23,9 +23,10 @@ and vector tables.
 
 ## Proven at scale
 
-Tested on **107 PDFs / 8,831 pages** it never saw during development — an
-Arabic teacher's guide, two SEC 10-Ks, 96 arXiv papers (15 fields), and 5
-OpenStax physics/chemistry/calculus textbooks (figures, geometry, exercises).
+Tested on **108 PDFs / 11,961 pages** it never saw during development — an
+Arabic teacher's guide, two SEC 10-Ks, 96 arXiv papers (15 fields), 5 OpenStax
+physics/chemistry/calculus textbooks (figures, geometry, exercises), and the
+3,130-page PostgreSQL 18 manual (deeply-nested reference tables, code blocks).
 The checks are *property-based and label-free*, so they scale to any corpus:
 
 | Property (must hold on every page) | Result |

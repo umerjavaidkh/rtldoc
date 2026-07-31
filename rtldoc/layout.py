@@ -116,7 +116,7 @@ def _merge_collinear(rules: list[Fill], horizontal: bool, tol: float = 2.0) -> l
     return out
 
 
-def _cluster_rules(fills: list[Fill], pad: float = 8.0) -> list[list[Fill]]:
+def _cluster_rules(fills: list[Fill], pad: float | None = None) -> list[list[Fill]]:
     """Group rule fills by spatial proximity (union-find on padded bboxes).
 
     A page can carry more than one table, plus assorted unrelated short
@@ -130,7 +130,24 @@ def _cluster_rules(fills: list[Fill], pad: float = 8.0) -> list[list[Fill]]:
     Scoping every table's own geometry to its own spatially-local cluster
     of rules removes that cross-contamination and also lets a page contain
     more than one independently-detected table.
+
+    `pad` defaults to the page's OWN typical row/column spacing (1.3x the
+    median gap between distinct rule edge positions), not a fixed constant.
+    A fixed 8pt pad is too small for a spaciously-set table and fragments
+    it into one isolated cluster per row divider -- confirmed real case: a
+    ruled table with a uniform 16.5pt row pitch had every horizontal rule
+    line hash into its own tiny cluster, each too small to individually
+    pass min_rows/min_cols, so all but the table's last couple of rows
+    silently vanished from detection. Deriving pad from the page's actual
+    spacing bridges one table's own rows while still leaving a much larger
+    gap to a genuinely separate table untouched; bounded to [8, 30]pt so a
+    sparse page with few rules can't blow the pad up arbitrarily.
     """
+    if pad is None:
+        edges = sorted({round(f.bbox[1], 1) for f in fills} | {round(f.bbox[3], 1) for f in fills})
+        gaps = [b - a for a, b in zip(edges, edges[1:]) if b - a > 0.5]
+        pad = min(max(8.0, float(np.median(gaps)) * 1.3), 30.0) if gaps else 8.0
+
     n = len(fills)
     parent = list(range(n))
 
@@ -625,6 +642,56 @@ def _cluster_images(images: list[ImageRef]) -> list[list[ImageRef]]:
     return list(groups.values())
 
 
+def _repeat_unit(words: list[str]) -> list[str] | None:
+    """If `words` is some shorter sequence repeated >=2 times end to end,
+    return that shortest repeating unit; otherwise None."""
+    n = len(words)
+    for p in range(1, n // 2 + 1):
+        if n % p:
+            continue
+        unit = words[:p]
+        if unit * (n // p) == words:
+            return unit
+    return None
+
+
+def _split_repeated_span(s: Span, tables: list[Region]) -> list[Span]:
+    """Split a span whose text is N adjacent table cells' identical value
+    drawn as one run, e.g. "non-reserved non-reserved non-reserved" for
+    three columns that happen to share a value.
+
+    Some PDF generators emit consecutive same-styled table cells as a single
+    text-showing run when their content happens to be identical, rather than
+    one run per cell. The combined span's bbox then straddles the boundary
+    between adjacent columns, so its containment with any single cell falls
+    under assign_spans's threshold and the whole value is silently dropped
+    from all of them -- confirmed real case: a wide reference table where a
+    large fraction of rows have this pattern (2-way and 3-way both occur on
+    the same page) lost entire columns' worth of "non-reserved" / "reserved"
+    values. The signature is narrow and safe: the text must be some shorter
+    word sequence repeated end to end with no leftover, which ordinary
+    prose essentially never produces, and the span must actually sit inside
+    a table. Splitting the bbox into N equal-width parts is safe here
+    specifically because all N copies are, by construction, identical text
+    in the same font/size -- they occupy equal width.
+    """
+    if not any(containment(s.bbox, t.bbox) > 0.6 for t in tables):
+        return [s]
+    words = s.text.split()
+    unit = _repeat_unit(words)
+    if unit is None:
+        return [s]
+    n_copies = len(words) // len(unit)
+    x0, y0, x1, y1 = s.bbox
+    width = (x1 - x0) / n_copies
+    text = " ".join(unit)
+    return [
+        Span(text=text, bbox=(x0 + i * width, y0, x0 + (i + 1) * width, y1),
+             font=s.font, size=s.size, color=s.color, flags=s.flags, dir=s.dir)
+        for i in range(n_copies)
+    ]
+
+
 def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.6) -> list[Region]:
     """Drop every span into its tightest containing region; leftovers become
     free-flow regions clustered by line proximity, column by column."""
@@ -633,7 +700,8 @@ def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.
     containers = [r for r in regions if r.kind in ("panel", "figure")]
     orphans: list[Span] = []
 
-    for s in prim.spans:
+    spans = [sub for s in prim.spans for sub in _split_repeated_span(s, tables)]
+    for s in spans:
         placed = False
         for t in tables:
             if containment(s.bbox, t.bbox) > thresh:
