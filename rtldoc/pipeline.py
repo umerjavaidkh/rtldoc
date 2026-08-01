@@ -90,7 +90,18 @@ def _region_text_geo(region: Region, geo_lines, opts) -> tuple[str, dict]:
     picked = list(geo_lines)
     if not picked:
         return "", {}
-    picked.sort(key=lambda p: p[0][1])
+    # Two geo-lines can share almost exactly the same row while sitting in
+    # different columns/segments (e.g. a code listing's line and its own
+    # "% comment", split apart by geobidi's column-gap detection even
+    # though they're the same physical text line) -- sorting by y alone
+    # has no tie-break for that and can emit them in the wrong order
+    # (confirmed real case: a comment coming out before the code line it
+    # describes). Round y into small buckets first (far smaller than any
+    # real inter-line gap, just enough to treat "same row" as equal), then
+    # order left-to-right within a bucket -- right-to-left for RTL text,
+    # since reading direction still applies within one row.
+    rtl = arabic.is_arabic(" ".join(t for _, t in picked))
+    picked.sort(key=lambda p: (round(p[0][1] / 3.0), -p[0][0] if rtl else p[0][0]))
     out, diags = [], {"reversed_lines": 0, "presentation_forms": 0}
     for _, raw in picked:
         clean, d = arabic.normalize(raw, opts)

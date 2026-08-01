@@ -752,23 +752,50 @@ def _merge_marker_columns(by_col: dict[int, list[Span]], min_rows: int = 3, shor
     lines mixed in), so an ordinary two-column page of running prose is
     never mistaken for this pattern.
     """
+    def _row_match_frac(smaller: list[list[Span]], larger: list[list[Span]]) -> float:
+        """Fraction of lines in `smaller` that have a same-row (y-matching)
+        line in `larger`. High on a genuinely row-paired layout even when
+        NEITHER side is short -- e.g. a code listing's variable-indent
+        lines each paired with their own "% comment" on the same row,
+        where the comment is routinely the longer of the two. This is what
+        lets that case merge too, not just the short-marker one."""
+        if not smaller:
+            return 0.0
+        hits = 0
+        for ln in smaller:
+            yc = sum((s.bbox[1] + s.bbox[3]) / 2 for s in ln) / len(ln)
+            size = sum(s.size for s in ln) / len(ln)
+            if any(abs(sum((t.bbox[1] + t.bbox[3]) / 2 for t in ln2) / len(ln2) - yc) <= size * 0.6
+                   for ln2 in larger):
+                hits += 1
+        return hits / len(smaller)
+
     cols = sorted(by_col)
     for i in range(len(cols) - 1):
         a, b = cols[i], cols[i + 1]
-        for src, dst in ((a, b), (b, a)):
-            src_lines = group_by_line(by_col[src])
-            if len(src_lines) < min_rows:
-                continue
+        a_lines, b_lines = group_by_line(by_col[a]), group_by_line(by_col[b])
+        if len(a_lines) < min_rows or len(b_lines) < min_rows:
+            continue
+        merged = False
+        for src, dst, src_lines, dst_lines in ((a, b, a_lines, b_lines), (b, a, b_lines, a_lines)):
             short = sum(1 for ln in src_lines
                        if len(" ".join(s.text for s in ln).strip()) <= _CELL_MAX_CHARS)
             if short / len(src_lines) < short_frac:
                 continue
-            dst_lines = group_by_line(by_col[dst])
-            if len(dst_lines) < min_rows:
-                continue
             by_col[dst] = by_col[dst] + by_col[src]
             by_col[src] = []
+            merged = True
             break
+        if merged:
+            continue
+        # Neither side qualifies as a short marker column -- check for
+        # strict row-correspondence instead (same signal, without the
+        # length requirement).
+        smaller, larger, src, dst = ((a_lines, b_lines, a, b) if len(a_lines) <= len(b_lines)
+                                     else (b_lines, a_lines, b, a))
+        if _row_match_frac(smaller, larger) >= 0.7:
+            by_col[dst] = by_col[dst] + by_col[src]
+            by_col[src] = []
 
 
 def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.6) -> list[Region]:
@@ -848,7 +875,7 @@ def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.
     return [r for r in regions if r.spans or r.kind in ("figure", "table")]
 
 
-_LIST_MARKER_RE = re.compile(r"^[•‣◦●○▪▫∙·oO*\-–—]$|^\(?[0-9]{1,3}[.)]?$|^\(?[a-zA-Z][.)]$")
+_LIST_MARKER_RE = re.compile(r"^[•‣◦●○▪▫∙·oO*\-–—]$|^\(?[0-9]{1,3}([.)]|[-–—][0-9]{1,3})?$|^\(?[a-zA-Z][.)]$")
 
 
 def _starts_with_list_marker(ls: list[Span], gap_ratio: float = 2.0) -> bool:
