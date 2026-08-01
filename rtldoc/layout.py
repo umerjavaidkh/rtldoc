@@ -409,16 +409,28 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
     #    tells a correct alignment from a coincidental one, since a wrong
     #    alignment scatters values into columns that don't line up as
     #    densely.
+    rules = [f.bbox for f in prim.fills if f.is_rule]
     best_score, best_tables = 0.0, []
     for edge in (lambda s: s.bbox[2], lambda s: s.bbox[0]):
-        score, tables = _detect_borderless_in_lines(lines, edge, min_rows, min_cols, tol, pad)
+        score, tables = _detect_borderless_in_lines(lines, edge, min_rows, min_cols, tol, pad, rules)
         if tables and score > best_score:
             best_score, best_tables = score, tables
     return best_tables
 
 
 def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, min_cols: int,
-                                 tol: float, pad: float) -> tuple[float, list[Region]]:
+                                 tol: float, pad: float, rules: list[Rect] = ()) -> tuple[float, list[Region]]:
+    # A genuine 2-column reference/glossary table (a symbolic code beside
+    # its description, neither numeric) needs only 2 columns, but requiring
+    # 3 unconditionally is what keeps pure coincidental alignment (two
+    # prose columns that happen to line up) from being misread as a table.
+    # Real drawn rules on the page are independent, author-provided
+    # evidence that at least *some* genuine tabular structure exists here,
+    # which is enough to safely relax that floor to 2 -- confirmed real
+    # case: an escape-sequence table (SEQUENCE | MEANING) framed by real
+    # top/bottom rules has exactly 2 columns and was rejected outright.
+    min_cols = 2 if rules and min_cols > 2 else min_cols
+
     votes: list[tuple[float, int]] = []
     for li, ln in enumerate(lines):
         for s in ln:
@@ -529,7 +541,18 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
         if not aligned:
             continue
         numeric_frac = sum(_is_numeric_cell(s.text) for s in aligned) / len(aligned)
-        if numeric_frac < 0.6:
+        # A real drawn rule immediately above AND below this band is
+        # independent, author-drawn evidence of a genuine table (a top
+        # border and bottom border, even with no internal row dividers),
+        # strong enough on its own to accept a non-numeric table --
+        # confirmed real case: an escape-sequence reference table
+        # ("\n" -> "Line feed (LF)", etc.) has neither column numeric, but
+        # is framed by real top/bottom rules exactly like any other table.
+        top_y = min(s.bbox[1] for s in band_spans)
+        bot_y = max(s.bbox[3] for s in band_spans)
+        framed = (any(abs(r[1] - top_y) <= tol * 5 or abs(r[3] - top_y) <= tol * 5 for r in rules)
+                 and any(abs(r[1] - bot_y) <= tol * 5 or abs(r[3] - bot_y) <= tol * 5 for r in rules))
+        if numeric_frac < 0.6 and not framed:
             continue
 
         # Guard: the grid must actually be *filled*. A real data table puts a
@@ -584,7 +607,17 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
                  else [table_x0, extents[0][0] - pad])
         for j in range(len(extents) - 1):
             splits.append((extents[j][1] + extents[j + 1][0]) / 2)
-        splits.append(extents[-1][1] + pad)
+        # The last column's right boundary, like the first column's left
+        # boundary above, should reach the whole band's own extent, not
+        # just its aligned members' -- a cell's content can spill into a
+        # separate trailing span with a different style (an inline italic
+        # run, say) that doesn't share the column's own alignment edge and
+        # so never enters `extents`, and would fall outside a boundary
+        # computed only from matched members (confirmed real case: "
+        # (octal)" after an italic "ddd" landed outside its own cell and
+        # was silently dropped).
+        table_x1 = max(s.bbox[2] for s in band_spans)
+        splits.append(max(extents[-1][1] + pad, table_x1))
 
         row_groups = _merge_wrapped_label_rows(row_lines, centers, tol, edge)
         row_ys = [(min(s.bbox[1] for ln in g for s in ln) + max(s.bbox[3] for ln in g for s in ln)) / 2
