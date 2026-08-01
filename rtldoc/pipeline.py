@@ -573,7 +573,8 @@ def to_markdown(result: PageResult) -> str:
                 lines.append(f"{b.text} {tag}".strip())
         lines.append("")
     if result.visual is not None:
-        lines.append(f"<!-- visual summary: {result.visual.description} -->")
+        lines.append("### Visual Summary")
+        lines.append(result.visual.description)
         lines.append("")
     return "\n".join(lines)
 
@@ -685,7 +686,8 @@ def to_html(result: PageResult) -> str:
     if in_list:
         out.append("</ul>")
     if result.visual is not None:
-        out.append(f'<aside class="visual-summary"><p>{_html.escape(result.visual.description)}</p></aside>')
+        out.append(f'<section class="visual-summary"><h3>Visual Summary</h3>'
+                   f'<p>{_html.escape(result.visual.description)}</p></section>')
     out.append("</section>")
     return "\n".join(out)
 
@@ -730,6 +732,10 @@ th { background: #f0f4f8; }
 [dir="rtl"] { text-align: right; }
 nav.page-nav { display: flex; justify-content: space-between; font-size: 0.9rem; margin: 1rem 0; }
 nav.page-nav a { color: #0d3b66; text-decoration: none; }
+.visual-summary { margin-top: 1.5rem; padding: 0.9rem 1.1rem; background: #fbf7ef;
+                  border-inline-start: 4px solid #b5471b; border-radius: 2px; }
+.visual-summary h3 { margin: 0 0 0.4rem 0; font-size: 0.95rem; color: #b5471b; }
+.visual-summary p { margin: 0; font-size: 0.9rem; color: #444; }
 """
 
 
