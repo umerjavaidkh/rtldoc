@@ -21,6 +21,8 @@ def main(argv=None):
     p.add_argument("--html", help="write one HTML page per PDF page, plus styles.css and index.html")
     p.add_argument("--no-geo", action="store_true")
     p.add_argument("--strip-harakat", action="store_true")
+    p.add_argument("--visual", action="store_true",
+                   help="add a geometry-only visual summary (images/diagrams/tables/layout) per page, no vision model")
 
     s = sub.add_parser("styles", help="style census -> label once per book series")
     s.add_argument("pdf"); s.add_argument("--pages"); s.add_argument("--out")
@@ -42,7 +44,8 @@ def main(argv=None):
     style_map = json.load(open(args.style_map)) if getattr(args,"style_map",None) else None
     opts = arabic.NormalizeOptions(strip_harakat=getattr(args,"strip_harakat",False))
     results = [pipeline.parse_page(doc[i], style_map, opts,
-                                   geometry_bidi=not getattr(args,"no_geo",False)) for i in idx]
+                                   geometry_bidi=not getattr(args,"no_geo",False),
+                                   visual_summary=getattr(args,"visual",False)) for i in idx]
 
     if args.cmd == "audit":
         print(json.dumps(pipeline.audit(results), ensure_ascii=False, indent=2)); return

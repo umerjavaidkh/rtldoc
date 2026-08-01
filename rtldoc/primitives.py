@@ -87,6 +87,13 @@ class Fill:
     is_chip: bool = False        # small square -> activity number badge
     is_panel: bool = False       # large block -> content container
     is_rule: bool = False        # thin -> separator line
+    is_stroke: bool = False      # drawn as a stroked outline, not a fill
+    # Endpoints of the drawing's own path, not just its bounding rect --
+    # needed to tell a flowchart's connecting line apart from its boxes
+    # (both reduce to the same kind of bbox otherwise) and to find which
+    # two shapes a line actually connects. None for filled rects, where
+    # the bbox alone is the shape.
+    points: tuple[tuple[float, float], ...] | None = None
 
     def __post_init__(self):
         w, h = self.bbox[2] - self.bbox[0], self.bbox[3] - self.bbox[1]
@@ -122,6 +129,27 @@ class PagePrimitives:
     def is_born_digital(self) -> bool:
         """Route: real text layer, or does this page need OCR?"""
         return self.char_count > 60
+
+
+def _drawing_points(d: dict) -> tuple[tuple[float, float], ...] | None:
+    """Flatten a get_drawings() entry's own path segments into plain (x, y)
+    points -- the bounding rect alone can't tell a diagram's connecting
+    line apart from its boxes (both reduce to the same kind of rect), and
+    can't say which two shapes a line actually joins."""
+    pts: list[tuple[float, float]] = []
+    for item in d.get("items", []):
+        op = item[0]
+        if op == "l":
+            pts.append((item[1].x, item[1].y))
+            pts.append((item[2].x, item[2].y))
+        elif op == "re":
+            r = item[1]
+            pts.extend([(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)])
+        else:
+            for p in item[1:]:
+                if hasattr(p, "x"):
+                    pts.append((p.x, p.y))
+    return tuple(pts) if pts else None
 
 
 def _near_white(rgb: tuple[float, float, float], tol: float = 0.04) -> bool:
@@ -478,7 +506,9 @@ def extract_page(page: "fitz.Page", drop_white_fills: bool = True,
         # span on the page into one "panel" and destroys reading order.
         if (r.x1 - r.x0) * (r.y1 - r.y0) >= drop_full_page_frac * prim.width * prim.height:
             continue
-        prim.fills.append(Fill(bbox=(r.x0, r.y0, r.x1, r.y1), color=tuple(rgb)))
+        points = _drawing_points(d)
+        prim.fills.append(Fill(bbox=(r.x0, r.y0, r.x1, r.y1), color=tuple(rgb),
+                               is_stroke=(dtype == "s"), points=points))
 
     for info in page.get_images(full=True):
         xref = info[0]

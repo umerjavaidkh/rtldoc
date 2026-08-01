@@ -23,7 +23,7 @@ from dataclasses import dataclass, field, asdict
 
 import fitz
 
-from . import arabic
+from . import arabic, visual
 from .layout import Region, assign_spans, group_by_line, order_regions, propose_regions
 from .primitives import PagePrimitives, Span, containment, extract_page, style_profile
 
@@ -67,6 +67,11 @@ class PageResult:
     born_digital: bool
     blocks: list[Block] = field(default_factory=list)
     activities: dict[str, dict] = field(default_factory=dict)
+    # Populated only when parse_page(..., visual_summary=True) -- a
+    # geometry-only ("no vision model") structural description of images,
+    # diagrams, and tables on this page. None by default so existing
+    # callers/output shapes are unaffected.
+    visual: "visual.PageVisual | None" = None
 
 
 def _chip_number(region: Region) -> int | None:
@@ -326,7 +331,7 @@ def _link_activities(regions: list[Region]) -> None:
 
 def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
                opts: arabic.NormalizeOptions | None = None,
-               geometry_bidi: bool = True) -> PageResult:
+               geometry_bidi: bool = True, visual_summary: bool = False) -> PageResult:
     opts = opts or arabic.NormalizeOptions()
     style_map = style_map or DEFAULT_STYLE_MAP
 
@@ -397,10 +402,12 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     # from glyph geometry (correct bidi) beats the span-based fallback, and a
     # table cell grid is authoritative.
     quality: dict[int, int] = {}
+    table_grids: dict[int, list] = {}
     for r in regions:
         grid = None
         if r.kind == "table":
             text, diag, grid = _table_text(r, owned, opts)
+            table_grids[id(r)] = grid
             q = 3
         elif geo_lines:
             text, diag = _region_text_geo(r, owned.get(id(r), []), opts)
@@ -446,6 +453,12 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
         key = str(b.activity)
         slot = result.activities.setdefault(key, {"activity": b.activity, "parts": []})
         slot["parts"].append({"role": b.role, "column": b.column, "text": b.text})
+
+    if visual_summary:
+        try:
+            result.visual = visual.describe_page(page, prim, regions, table_grids, result.columns)
+        except Exception:
+            result.visual = None
 
     return result
 
@@ -559,6 +572,9 @@ def to_markdown(result: PageResult) -> str:
             else:
                 lines.append(f"{b.text} {tag}".strip())
         lines.append("")
+    if result.visual is not None:
+        lines.append(f"<!-- visual summary: {result.visual.description} -->")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -668,6 +684,8 @@ def to_html(result: PageResult) -> str:
             out.append(f'<div class="{b.role}"{_dir_attr(b.text)}{tag_attr}>{paras}</div>')
     if in_list:
         out.append("</ul>")
+    if result.visual is not None:
+        out.append(f'<aside class="visual-summary"><p>{_html.escape(result.visual.description)}</p></aside>')
     out.append("</section>")
     return "\n".join(out)
 
