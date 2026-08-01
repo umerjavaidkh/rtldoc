@@ -693,6 +693,47 @@ def _split_repeated_span(s: Span, tables: list[Region]) -> list[Span]:
     ]
 
 
+def _merge_marker_columns(by_col: dict[int, list[Span]], min_rows: int = 3, short_frac: float = 0.8) -> None:
+    """Merge a narrow marker/number column's spans into its adjacent wide
+    content column when their entries share the same row.
+
+    A Table of Contents' "5.1" section numbers, or a category list's "1."
+    markers, routinely land in their own detected column right beside the
+    titles/content they introduce -- column detection is purely geometric
+    and has no way to know these should stay row-paired rather than be
+    read as two independent columns (every marker, then every title, in
+    two separate passes). Confirmed real cases: a Table of Contents whose
+    numbers came out entirely separated from their own titles, and a
+    category list whose headers came out separated from their own items.
+
+    Reassigning the marker column's spans into the content column lets the
+    existing same-line grouping (group_by_line) recombine each marker with
+    its row automatically, since the two already share almost exactly the
+    same y-position by construction -- no new line-matching logic needed.
+    A column only qualifies as a marker column when almost every one of
+    its own lines is short (a real paragraph column will have long-wrapped
+    lines mixed in), so an ordinary two-column page of running prose is
+    never mistaken for this pattern.
+    """
+    cols = sorted(by_col)
+    for i in range(len(cols) - 1):
+        a, b = cols[i], cols[i + 1]
+        for src, dst in ((a, b), (b, a)):
+            src_lines = group_by_line(by_col[src])
+            if len(src_lines) < min_rows:
+                continue
+            short = sum(1 for ln in src_lines
+                       if len(" ".join(s.text for s in ln).strip()) <= _CELL_MAX_CHARS)
+            if short / len(src_lines) < short_frac:
+                continue
+            dst_lines = group_by_line(by_col[dst])
+            if len(dst_lines) < min_rows:
+                continue
+            by_col[dst] = by_col[dst] + by_col[src]
+            by_col[src] = []
+            break
+
+
 def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.6) -> list[Region]:
     """Drop every span into its tightest containing region; leftovers become
     free-flow regions clustered by line proximity, column by column."""
@@ -761,6 +802,7 @@ def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.
     for s in orphans:
         col = _column_of((s.bbox[0] + s.bbox[2]) / 2, boundaries)
         by_col.setdefault(col, []).append(s)
+    _merge_marker_columns(by_col)
     for col, spans in by_col.items():
         for r in _cluster_flow(spans):
             r.column = col
