@@ -419,6 +419,22 @@ def extract_page(page: "fitz.Page", drop_white_fills: bool = True,
                 text = "".join(ch["c"] for ch in span.get("chars", []))
                 if not text.strip():
                     continue
+                # A zero-width span containing only Arabic diacritics
+                # (tashkeel) is a redundant echo, not real content: some
+                # justified-Arabic typesetting draws a diacritic twice --
+                # once properly combined into its word's own span (which
+                # already carries it correctly), once again as a separate,
+                # zero-width mark positioned exactly on top of the letter
+                # for fine placement. Confirmed real case: the word's own
+                # span already read correctly fully vocalized ("بسّامُ فتًى
+                # ...عامًا"), while these extra echoes had no base letter of
+                # their own at all -- left in, they become their own
+                # orphaned one-character "paragraph" blocks (and, worse,
+                # can get picked up as a bogus figure caption) with zero
+                # added information.
+                bbox = span["bbox"]
+                if bbox[0] == bbox[2] and all(0x064B <= ord(c) <= 0x065F for c in text.strip()):
+                    continue
                 prim.spans.append(
                     Span(
                         text=text,
