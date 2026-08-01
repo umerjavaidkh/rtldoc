@@ -312,7 +312,8 @@ def group_by_line(spans: list[Span], tol_frac: float = 0.5) -> list[list[Span]]:
 
 
 def _merge_wrapped_label_rows(row_lines: list[list[Span]], centers: list[float],
-                              tol: float, indent_ratio: float = 1.8) -> list[list[list[Span]]]:
+                              tol: float, edge=lambda s: s.bbox[2],
+                              indent_ratio: float = 1.8) -> list[list[list[Span]]]:
     """Merge a row label's wrapped continuation lines into its data row.
 
     A borderless table's row_lines are one physical text line each, but a
@@ -344,7 +345,7 @@ def _merge_wrapped_label_rows(row_lines: list[list[Span]], centers: list[float],
     line's data belongs to the row being built, and the row is complete.
     """
     def has_data(ln: list[Span]) -> bool:
-        return any(any(abs(s.bbox[2] - cx) <= tol for cx in centers) for s in ln)
+        return any(any(abs(edge(s) - cx) <= tol for cx in centers) for s in ln)
 
     def indent(ln: list[Span]) -> float:
         return min(s.bbox[0] for s in ln)
@@ -393,14 +394,38 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
     if len(lines) < min_rows:
         return []
 
-    # 1. column votes: right edges of short, cell-like spans, tagged by row
+    # 1. column votes: cell-like spans' edges, tagged by row. Tried BOTH
+    #    right-edge (numeric/right-aligned columns, the common case) and
+    #    left-edge (a table of short TEXT values, not numbers, is routinely
+    #    left-aligned instead -- confirmed real case: a 4-column reference
+    #    table where every cell starts at a fixed x but ends wherever its
+    #    own text happens to). Whichever edge is wrong for a given table
+    #    doesn't reliably fail closed: it can still find >= min_cols
+    #    coincidentally-aligned edges and produce a plausible-looking but
+    #    wrong grid (confirmed real case: right-edge "succeeded" with 6
+    #    bogus columns on a left-aligned table, so a naive first-match-wins
+    #    fallback never even tried left-edge). Scoring both by their own
+    #    fill fraction and keeping the better-filled one is what actually
+    #    tells a correct alignment from a coincidental one, since a wrong
+    #    alignment scatters values into columns that don't line up as
+    #    densely.
+    best_score, best_tables = 0.0, []
+    for edge in (lambda s: s.bbox[2], lambda s: s.bbox[0]):
+        score, tables = _detect_borderless_in_lines(lines, edge, min_rows, min_cols, tol, pad)
+        if tables and score > best_score:
+            best_score, best_tables = score, tables
+    return best_tables
+
+
+def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, min_cols: int,
+                                 tol: float, pad: float) -> tuple[float, list[Region]]:
     votes: list[tuple[float, int]] = []
     for li, ln in enumerate(lines):
         for s in ln:
             if len(s.text.strip()) <= _CELL_MAX_CHARS:
-                votes.append((s.bbox[2], li))
+                votes.append((edge(s), li))
     if len(votes) < min_rows * min_cols:
-        return []
+        return 0.0, []
     votes.sort()
 
     # 2. greedy-cluster right edges into candidate columns
@@ -418,7 +443,7 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
     # 3. a real column is one an alignment supports across enough rows
     real = [c for c in clusters if len(c["lines"]) >= min_rows]
     if len(real) < min_cols:
-        return []
+        return 0.0, []
     real_lines = [c["lines"] for c in real]
 
     # 4. strongly-tabular rows hit >= min_cols of those columns; split them
@@ -428,7 +453,7 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
 
     tab = [li for li in range(len(lines)) if hits(li) >= min_cols]
     if len(tab) < min_rows:
-        return []
+        return 0.0, []
 
     def _has_section_break(prev: int, cur_li: int) -> bool:
         """A colon-terminated PROSE SENTENCE between two tabular rows is a
@@ -465,6 +490,7 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
     bands.append(run)
 
     out: list[Region] = []
+    fill_scores: list[float] = []
     for band in bands:
         if len(band) < min_rows:
             continue
@@ -499,7 +525,7 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
         # *words* get shredded into a garbage grid.
         aligned = [s for ln in row_lines for s in ln
                    if len(s.text.strip()) <= _CELL_MAX_CHARS
-                   and any(abs(s.bbox[2] - cx) <= tol for cx in centers)]
+                   and any(abs(edge(s) - cx) <= tol for cx in centers)]
         if not aligned:
             continue
         numeric_frac = sum(_is_numeric_cell(s.text) for s in aligned) / len(aligned)
@@ -528,15 +554,16 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
             1
             for ln in data_lines
             for cx in centers
-            if any(abs(s.bbox[2] - cx) <= tol and len(s.text.strip()) <= _CELL_MAX_CHARS for s in ln)
+            if any(abs(edge(s) - cx) <= tol and len(s.text.strip()) <= _CELL_MAX_CHARS for s in ln)
         )
-        if not data_lines or filled / (len(data_lines) * len(centers)) < 0.5:
+        fill_frac = filled / (len(data_lines) * len(centers)) if data_lines else 0.0
+        if fill_frac < 0.5:
             continue
 
         # each column's left/right extent, from the spans that align to it
         extents = []
         for cx in centers:
-            members = [sp for ln in row_lines for sp in ln if abs(sp.bbox[2] - cx) <= tol]
+            members = [sp for ln in row_lines for sp in ln if abs(edge(sp) - cx) <= tol]
             if not members:
                 continue
             extents.append((min(sp.bbox[0] for sp in members), max(sp.bbox[2] for sp in members)))
@@ -544,13 +571,22 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
             continue
 
         table_x0 = min(s.bbox[0] for s in band_spans)
-        # vertical column splits: label | col0 | col1 | ...
-        splits = [table_x0, extents[0][0] - pad]
+        # vertical column splits: label | col0 | col1 | ... -- but only add a
+        # leading "label" column if one actually exists (real, tol-sized gap
+        # before the first detected column). Some tables have no such
+        # column at all (their first detected column starts right at the
+        # table's own left edge); always inserting one there produced a
+        # degenerate, near-zero-width phantom first column and shifted
+        # every real column's data over by one (confirmed real case: a
+        # 4-column reference table came out as 5 columns, values in the
+        # wrong cells).
+        splits = ([min(table_x0, extents[0][0] - pad)] if extents[0][0] - pad - table_x0 <= tol
+                 else [table_x0, extents[0][0] - pad])
         for j in range(len(extents) - 1):
             splits.append((extents[j][1] + extents[j + 1][0]) / 2)
         splits.append(extents[-1][1] + pad)
 
-        row_groups = _merge_wrapped_label_rows(row_lines, centers, tol)
+        row_groups = _merge_wrapped_label_rows(row_lines, centers, tol, edge)
         row_ys = [(min(s.bbox[1] for ln in g for s in ln) + max(s.bbox[3] for ln in g for s in ln)) / 2
                  for g in row_groups]
         rbounds = [min(s.bbox[1] for s in band_spans) - pad]
@@ -565,7 +601,8 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
                     bbox=(splits[ci], rbounds[ri], splits[ci + 1], rbounds[ri + 1]),
                     kind="flow", table_row=ri, table_col=ci))
         out.append(table)
-    return out
+        fill_scores.append(fill_frac)
+    return (sum(fill_scores) / len(fill_scores) if fill_scores else 0.0), out
 
 
 def propose_regions(prim: PagePrimitives, min_panel_area: float = 2000.0) -> list[Region]:
