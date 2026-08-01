@@ -431,10 +431,34 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
     # top/bottom rules has exactly 2 columns and was rejected outright.
     min_cols = 2 if rules and min_cols > 2 else min_cols
 
+    # The _CELL_MAX_CHARS cap on which spans may vote for a column exists to
+    # keep wrapped PROSE lines from inventing spurious columns. But a table
+    # cell can legitimately be a long *single token* (a hex-escaped literal
+    # name like "/paired#28#29parentheses", 24 chars) -- capping by char
+    # count alone drops those, so a middle row's cells stop voting, the row
+    # stops counting as tabular, and the table's band breaks apart
+    # (confirmed real case: a "LITERAL NAME | RESULT" example table went
+    # undetected). Inside a rule-framed vertical span (strong, author-drawn
+    # evidence of a real table there), also let a long span vote if it's
+    # narrow relative to the page's content width -- a wrapped prose line
+    # spans most of the width and still won't qualify, but a long-but-narrow
+    # single-token cell does.
+    all_spans = [s for ln in lines for s in ln if s.text.strip()]
+    content_w = (max(s.bbox[2] for s in all_spans) - min(s.bbox[0] for s in all_spans)) if all_spans else 0.0
+    rule_ys = [y for r in rules for y in (r[1], r[3])]
+    framed_lo, framed_hi = (min(rule_ys), max(rule_ys)) if len(rule_ys) >= 2 else (0.0, -1.0)
+
+    def votes_for_column(s: "Span", cell_w_frac: float = 0.5) -> bool:
+        if len(s.text.strip()) <= _CELL_MAX_CHARS:
+            return True
+        cy = (s.bbox[1] + s.bbox[3]) / 2
+        return (framed_lo <= cy <= framed_hi
+                and (s.bbox[2] - s.bbox[0]) <= content_w * cell_w_frac)
+
     votes: list[tuple[float, int]] = []
     for li, ln in enumerate(lines):
         for s in ln:
-            if len(s.text.strip()) <= _CELL_MAX_CHARS:
+            if votes_for_column(s):
                 votes.append((edge(s), li))
     if len(votes) < min_rows * min_cols:
         return 0.0, []
