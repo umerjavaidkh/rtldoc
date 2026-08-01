@@ -277,7 +277,13 @@ def _nearest_caption(fig: "Block", blocks: list["Block"], max_chars: int = 120) 
     fy = (fig.bbox[1] + fig.bbox[3]) / 2
     best, best_d = None, None
     for b in blocks:
-        if b is fig or b.role in ("figure", "table") or not b.text.strip():
+        # A "passage" is a substantial excerpt already captured correctly
+        # as its own block -- never a mere image caption. Without this
+        # exclusion, a reading passage sitting near its own illustration
+        # (a very common layout: story text beside its picture) becomes
+        # the figure's "nearest" candidate and gets duplicated wholesale
+        # (truncated to max_chars) as a fake caption, confirmed real case.
+        if b is fig or b.role in ("figure", "table", "passage") or not b.text.strip():
             continue
         bx, by = (b.bbox[0] + b.bbox[2]) / 2, (b.bbox[1] + b.bbox[3]) / 2
         d = ((fx - bx) ** 2 + (fy - by) ** 2) ** 0.5
