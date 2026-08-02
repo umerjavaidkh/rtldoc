@@ -747,7 +747,8 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
 
     best_score, voter_tables = 0.0, []
     for edge in (lambda s: s.bbox[2], lambda s: s.bbox[0]):
-        score, tables = _detect_borderless_in_lines(lines, edge, min_rows, min_cols, tol, pad, rules)
+        score, tables = _detect_borderless_in_lines(lines, edge, min_rows, min_cols, tol, pad, rules,
+                                                     prim.height)
         if tables and score > best_score:
             best_score, voter_tables = score, tables
 
@@ -760,7 +761,8 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
 
 
 def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, min_cols: int,
-                                 tol: float, pad: float, rules: list[Rect] = ()) -> tuple[float, list[Region]]:
+                                 tol: float, pad: float, rules: list[Rect] = (),
+                                 page_bottom: float | None = None) -> tuple[float, list[Region]]:
     # A genuine 2-column reference/glossary table (a symbolic code beside
     # its description, neither numeric) needs only 2 columns, but requiring
     # 3 unconditionally is what keeps pure coincidental alignment (two
@@ -915,8 +917,25 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
         # is framed by real top/bottom rules exactly like any other table.
         top_y = min(s.bbox[1] for s in band_spans)
         bot_y = max(s.bbox[3] for s in band_spans)
-        framed = (any(abs(r[1] - top_y) <= tol * 5 or abs(r[3] - top_y) <= tol * 5 for r in rules)
-                 and any(abs(r[1] - bot_y) <= tol * 5 or abs(r[3] - bot_y) <= tol * 5 for r in rules))
+        top_framed = any(abs(r[1] - top_y) <= tol * 5 or abs(r[3] - top_y) <= tol * 5 for r in rules)
+        bot_framed = any(abs(r[1] - bot_y) <= tol * 5 or abs(r[3] - bot_y) <= tol * 5 for r in rules)
+        # A table's last page before it continues onto the next one has no
+        # drawn bottom rule at all (there's nothing there to draw one
+        # against) -- a real top rule plus the band simply running down to
+        # near the page's own bottom margin, with nothing unrelated
+        # following it, is the same kind of independent authored evidence
+        # as a matched bottom rule (confirmed real case: a 5-column
+        # operator-summary table spanning many pages had every page but the
+        # very first end this way, and was rejected outright without this).
+        if not bot_framed and page_bottom is not None:
+            # Generous on purpose: a page's own bottom margin/footer area
+            # (page number, running header) routinely eats 80-90pt, far
+            # more than the tol*5 slack used for an actual drawn rule --
+            # the min_rows/numeric-or-framed/fill-fraction guards already
+            # in this function are what keeps this from accepting
+            # unrelated content, not a tight distance here.
+            bot_framed = (page_bottom - bot_y) <= tol * 15
+        framed = top_framed and bot_framed
         if numeric_frac < 0.6 and not framed:
             continue
 
