@@ -21,6 +21,7 @@ Two ideas do the heavy lifting here.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -374,6 +375,323 @@ def _merge_wrapped_label_rows(row_lines: list[list[Span]], centers: list[float],
     return groups
 
 
+def _detect_row_wrapped_tables(lines: list[list[Span]], min_rows: int, tol: float, pad: float,
+                                rule_fills: list[Fill]) -> list[Region]:
+    """Recover a rule-framed key/value definition table whose trailing
+    column (a description/VALUE) legitimately wraps across many lines per
+    row -- a layout the alignment voter above can't see, because that voter
+    looks for every column co-located on the SAME physical line, and here
+    only a row's first line carries all its columns while the rest of the
+    row is one long wrapped cell (confirmed real case: a PDF filter's
+    parameter dictionary -- KEY | TYPE | VALUE -- where VALUE wraps 3-6
+    lines; every row landed in its own singleton band under the small
+    fixed-gap tolerance meant for short wrapped LABELS, and the whole table
+    went undetected).
+
+    The trick is WHICH span is allowed to vote: only each line's own
+    LEFTMOST span, never any other. A row-start line's leading span (the
+    KEY) recurs at a fixed x across rows -- clean signal. A continuation
+    line's leading span (the wrapped VALUE's own text) recurs too, just at
+    a different, wider x. Spans buried mid-sentence (an inline emphasized
+    "true"/"false"/a cross-reference like "Rows") never win this vote no
+    matter how short they are or how often they coincidentally align --
+    that noise is exactly what made the generic per-span voter unusable
+    here (confirmed real case: three unrelated short keywords on three
+    different lines happened to right-align within tolerance and were
+    read as a 2nd real column, corrupting row boundaries).
+
+    Only tried when real drawn rules frame a region -- independent,
+    author-provided evidence a table exists there -- since unlike the
+    generic voter this has no numeric-fraction fallback guard to fall back
+    on for a purely coincidental alignment.
+
+    Rules are grouped by matching horizontal EXTENT (x0/x1) first, not by
+    vertical proximity: taking the min/max Y of EVERY rule on the page as
+    one global frame is fragile the instant a page carries more than one
+    unrelated rule group -- a running page-header divider far above the
+    real table, say -- which balloons the "framed" range to swallow
+    unrelated prose above the table as if it were part of it (confirmed
+    real case: an intro paragraph and worked examples above a real
+    escape-sequence table got pulled into the same false table because the
+    page's header rule sat 250pt above the table's own top rule). Grouping
+    by y-proximity (as _cluster_rules does for fully gridded tables) is
+    wrong here for the opposite reason: THIS table's own top/divider/bottom
+    rules are deliberately far apart -- that's the whole point of a framed
+    table with no internal row rules -- so a proximity cluster would split
+    a single table's own frame into disconnected pieces. A table's frame
+    rules, whatever their spacing, always share the same left/right extent
+    (the same author-drawn box), which an unrelated rule elsewhere on the
+    page essentially never coincidentally matches to within a few points.
+    """
+    # A tight tolerance here, deliberately NOT the wider `tol` used for text
+    # alignment elsewhere in this function -- an unrelated rule can land
+    # within a few points of a table's own extent by pure coincidence
+    # (confirmed real case: a page-header rule's extent missed a real
+    # table's own extent by only 5.8pt on both edges, well inside `tol`,
+    # and got wrongly folded into the table's frame).
+    x_tol = 3.0
+    x_groups: list[list[Fill]] = []
+    for f in rule_fills:
+        x0, x1 = f.bbox[0], f.bbox[2]
+        match = next((g for g in x_groups
+                     if abs(g[0].bbox[0] - x0) <= x_tol and abs(g[0].bbox[2] - x1) <= x_tol), None)
+        if match is not None:
+            match.append(f)
+        else:
+            x_groups.append([f])
+
+    page_bottom = max((s.bbox[3] for ln in lines for s in ln), default=0.0)
+
+    out: list[Region] = []
+    for cluster in x_groups:
+        if len(cluster) < 2:
+            continue
+        result = _detect_row_wrapped_in_frame(lines, min_rows, tol, pad, cluster, page_bottom)
+        if not result:
+            # No visible bottom rule: the table's last page has no closing
+            # border because it continues onto the NEXT page (confirmed
+            # real case: a filter's parameter table opens with a top rule
+            # and a header-divider rule but ends with the page itself, its
+            # actual bottom rule sitting on a page that hasn't been parsed
+            # yet). Retrying with the frame opened all the way to the
+            # page's own bottom margin recovers it; the same min_rows +
+            # KEY-diversity + non-wide-row guards above still gate this, so
+            # ordinary prose below an unrelated short table still won't
+            # get swept in as fake rows.
+            result = _detect_row_wrapped_in_frame(lines, min_rows, tol, pad, cluster, page_bottom,
+                                                  open_ended=True)
+        out.extend(result)
+    return out
+
+
+def _detect_row_wrapped_in_frame(lines: list[list[Span]], min_rows: int, tol: float, pad: float,
+                                  rule_cluster: list[Fill], page_bottom: float,
+                                  open_ended: bool = False) -> list[Region]:
+    rule_ys = [y for f in rule_cluster for y in (f.bbox[1], f.bbox[3])]
+    framed_lo = min(rule_ys)
+    framed_hi = page_bottom if open_ended else max(rule_ys)
+
+    votes: list[tuple[float, int]] = []
+    for li, ln in enumerate(lines):
+        if not ln:
+            continue
+        cy = (min(s.bbox[1] for s in ln) + max(s.bbox[3] for s in ln)) / 2
+        if not (framed_lo - tol <= cy <= framed_hi + tol):
+            continue
+        leftmost = min(ln, key=lambda s: s.bbox[0])
+        if leftmost.text.strip():
+            votes.append((leftmost.bbox[0], li))
+    if len(votes) < min_rows:
+        return []
+    votes.sort()
+
+    clusters: list[dict] = []
+    cur: dict | None = None
+    for x, li in votes:
+        if cur is not None and x - cur["last"] <= tol:
+            cur["xs"].append(x)
+            cur["lines"].append(li)
+            cur["last"] = x
+        else:
+            cur = {"xs": [x], "lines": [li], "last": x}
+            clusters.append(cur)
+    # A real drawn top+divider rule frame (guaranteed by the caller) is
+    # independent, author-provided evidence a table exists here, strong
+    # enough to accept as few as 2 recurring KEY entries (a header row plus
+    # a single real data row) rather than requiring min_rows -- confirmed
+    # real case: a filter's Table 3.9 opens with just ONE parameter ("K")
+    # whose own description happens to run 9 lines, so its header + single
+    # data row is genuinely only 2 KEY-column lines, and requiring 3 would
+    # reject a real, unambiguous table outright. The diversity, non-wide-
+    # row, and majority-multi-line-wrap checks below still gate this the
+    # same as any other candidate.
+    key_min_rows = min(2, min_rows)
+    real = [c for c in clusters if len(c["lines"]) >= key_min_rows]
+    if not real:
+        return []
+
+    # The KEY/label column is the LEFTMOST recurring margin -- any line
+    # starting further right is a row's own wrapped continuation, not a
+    # new row (a real table's label column always sits left of its data).
+    key_cluster = min(real, key=lambda c: sum(c["xs"]) / len(c["xs"]))
+    row_start_lines = sorted(key_cluster["lines"])
+    if len(row_start_lines) < key_min_rows:
+        return []
+    key_x = sum(key_cluster["xs"]) / len(key_cluster["xs"])
+
+    # A genuine KEY column names a DIFFERENT parameter/entry each row; a
+    # bulleted list's leading marker ("•") recurs at a fixed left margin
+    # too but is the SAME literal glyph every row, which is what actually
+    # distinguishes a real label column from a bullet list wrapping across
+    # many lines (confirmed real case: a bulleted list of stream-object
+    # rules was read as a table whose single "KEY" was always "•").
+    # A strict majority-unique test (not just "more than one distinct value
+    # ever appears") is needed -- confirmed real case: a figure caption
+    # line plus three bulleted sub-items had exactly 2 distinct key texts
+    # ("FIGURE 9.15" and the bullet glyph) across 4 rows, which cleared a
+    # bare ">1 distinct" bar while still being 75% the same repeated glyph.
+    key_texts_list = [min(lines[li], key=lambda s: s.bbox[0]).text.strip() for li in row_start_lines]
+    if len(set(key_texts_list)) / len(key_texts_list) <= 0.5:
+        return []
+
+    # The ratio test above can still be diluted below its own threshold by
+    # unrelated ORDINARY PROSE lines that happen to share the recurring
+    # margin too (any two different prose lines are, trivially, distinct
+    # text) -- confirmed real case: a figure caption's own bullet list sat
+    # at the exact same x as two ordinary paragraph lines just above it (the
+    # page's default body-text margin), and those two genuinely-different
+    # sentences were enough "distinct" values to clear the 0.5 ratio despite
+    # the bullet itself repeating 3 times. A repeated key that is a short,
+    # non-alphanumeric glyph (a bullet, dash, or similar marker) is never a
+    # real parameter/entry name no matter how the overall ratio comes out.
+    most_common_text, most_common_count = Counter(key_texts_list).most_common(1)[0]
+    if most_common_count > 1 and len(most_common_text) <= 2 and not most_common_text.isalnum():
+        return []
+
+    # Consistent short columns after KEY (TYPE, and sometimes a further one
+    # like an "OPI COMMENT" name), discovered one position at a time --
+    # voted ONLY from row-start lines' own span at that position, so noise
+    # from continuation-line prose keywords never enters this vote at all
+    # (it only ever looks at lines already confirmed as row starts).
+    # Confirmed real case: a 4-column dictionary -- KEY | TYPE | OPI COMMENT
+    # | VALUE -- needs two extra columns found this way, not just one.
+    extra_col_xs: list[float] = []
+    pos = 1
+    while True:
+        pos_spans = []
+        for li in row_start_lines:
+            ln = sorted(lines[li], key=lambda s: s.bbox[0])
+            if len(ln) > pos and len(ln[pos].text.strip()) <= _CELL_MAX_CHARS:
+                pos_spans.append(ln[pos])
+        if len(pos_spans) < max(key_min_rows, int(len(row_start_lines) * 0.6)):
+            break
+        # A short span's OWN leading phrase (an italicized "(Optional)", a
+        # PDF-version qualifier like "(Optional; PDF 1.2)") is routinely
+        # split from the rest of the sentence into its own span purely by
+        # styling -- that qualifier is still the START of the VALUE cell,
+        # not a genuine further column. Every real TYPE/OPI-COMMENT-style
+        # column value in this book's parameter dictionaries is a bare
+        # word or identifier; a PARENTHESIZED qualifier is never one --
+        # checking the candidate span's own leading character, rather than
+        # trying to characterize whatever text happens to follow it (which
+        # is unreliable: a real column's own trailing VALUE prose follows
+        # it too, and looks the same locally), is what actually tells them
+        # apart (confirmed real case: "(Optional)" was wrongly kept as an
+        # extra column using a "does long prose follow" test, since real
+        # TYPE columns like "boolean" are ALSO immediately followed by the
+        # row's genuine long VALUE prose -- that pattern alone can't
+        # distinguish a real last column from a fake one).
+        if sum(1 for s in pos_spans if s.text.strip().startswith("(")) > len(pos_spans) * 0.5:
+            break
+        xs = sorted(s.bbox[0] for s in pos_spans)
+        if xs[-1] - xs[0] > tol * 2:
+            break
+        extra_col_xs.append(sum(xs) / len(xs))
+        pos += 1
+
+    # This detector's whole premise is a genuine KEY/TYPE(/.../VALUE
+    # definition table -- a real TYPE-like column recurring right after
+    # KEY on every row. Without at least one, "recurring left margin" is
+    # too weak a signal on its own and starts matching page furniture that
+    # has nothing to do with a table at all (confirmed real case: a
+    # figure's caption line and the NEXT section's heading happened to sit
+    # at a similar indent below an image frame's top/bottom border rules,
+    # with no TYPE-like column anywhere -- everything between them,
+    # including an unrelated bulleted list, got welded into one bogus
+    # "value" cell).
+    if not extra_col_xs:
+        return []
+
+    # Abstain if the discovered extra column(s) ALSO recur on the wrapped
+    # CONTINUATION lines (not just the row-start line) -- that means the
+    # "extra column" is actually its own independently-wrapping data
+    # column (several data columns, each listing its own values down
+    # multiple lines in lockstep), a genuinely wider multi-column grid
+    # this detector's model can't represent, not a "label(s) + one wrapped
+    # trailing value" table (confirmed real case: a 4-column algorithm-
+    # support matrix -- SubFilter value | three digest-algorithm columns --
+    # had each of its 3 extra columns list several stacked values down
+    # subsequent lines, and welding those into one trailing cell garbled
+    # the whole table). In a genuine definition table, only the FINAL
+    # (VALUE) cell ever continues past its row-start line; TYPE/OPI-COMMENT
+    # -like columns appear exactly once per row.
+    continuation_lines = [li for lo, hi in
+                          [(row_start_lines[i], (row_start_lines[i + 1] - 1 if i + 1 < len(row_start_lines) else lo))
+                           for i, lo in enumerate(row_start_lines)]
+                          for li in range(lo + 1, hi + 1)]
+    touches = sum(1 for li in continuation_lines
+                 if any(abs(s.bbox[0] - cx) <= tol for s in lines[li] for cx in extra_col_xs))
+    if continuation_lines and touches / len(continuation_lines) > 0.15:
+        return []
+
+    frame_line_idxs = [li for li, ln in enumerate(lines) if ln and
+                       framed_lo - tol <= (min(s.bbox[1] for s in ln) + max(s.bbox[3] for s in ln)) / 2
+                       <= framed_hi + tol]
+    last_frame_line = max(frame_line_idxs) if frame_line_idxs else row_start_lines[-1]
+
+    bands: list[tuple[int, int]] = []
+    for i, lo in enumerate(row_start_lines):
+        hi = row_start_lines[i + 1] - 1 if i + 1 < len(row_start_lines) else last_frame_line
+        bands.append((lo, hi))
+
+    # This detector exists specifically for rows whose trailing cell wraps
+    # across multiple lines -- if most "rows" turn out to be a single line
+    # each, the leftmost-span voting has actually just rediscovered an
+    # ORDINARY paragraph's own left margin (every line of a left-justified
+    # paragraph starts at the same x, which trivially "recurs" and passes
+    # the diversity check too, since each line begins with a different
+    # word) rather than a real table (confirmed real case: a plain prose
+    # paragraph below an unrelated small table, opened up by the no-
+    # closing-rule retry above, got read as a table with one bogus 1-line
+    # "row" per paragraph line). The table's own HEADER band ("KEY TYPE
+    # VALUE") is excluded from this check -- it never wraps, even in a
+    # genuine table, and a table with only a header plus a single (however
+    # long) real row is still just 1 of 1 DATA bands to judge, which must
+    # not be diluted by an always-non-wrapping header into looking like a
+    # majority failure.
+    data_bands = bands[1:]
+    if data_bands and (sum(1 for lo, hi in data_bands if hi > lo)
+                       < max(1, len(data_bands) * 0.5)):
+        return []
+
+    band_spans = [[s for li in range(lo, hi + 1) for s in lines[li]] for lo, hi in bands]
+    all_band_spans = [s for spans in band_spans for s in spans]
+    if not all_band_spans:
+        return []
+
+    key_members = [s for spans in band_spans for s in spans if abs(s.bbox[0] - key_x) <= tol]
+    key_extent = (min(s.bbox[0] for s in key_members), max(s.bbox[2] for s in key_members))
+    table_x0 = min(s.bbox[0] for s in all_band_spans)
+    table_x1 = max(s.bbox[2] for s in all_band_spans)
+
+    splits = [table_x0]
+    prev_extent = key_extent
+    for cx in extra_col_xs:
+        members = [s for spans in band_spans for s in spans if abs(s.bbox[0] - cx) <= tol]
+        if not members:
+            continue
+        extent = (min(s.bbox[0] for s in members), max(s.bbox[2] for s in members))
+        splits.append((prev_extent[1] + extent[0]) / 2)
+        prev_extent = extent
+    splits.append(max(prev_extent[1] + pad, splits[-1] + pad))
+    splits.append(max(splits[-1], table_x1))
+
+    rbounds = [min(s.bbox[1] for s in all_band_spans) - pad]
+    for i in range(len(bands) - 1):
+        this_bot = max(s.bbox[3] for s in band_spans[i])
+        next_top = min(s.bbox[1] for s in band_spans[i + 1])
+        rbounds.append((this_bot + next_top) / 2)
+    rbounds.append(max(s.bbox[3] for s in all_band_spans) + pad)
+
+    table = Region(bbox=(splits[0], rbounds[0], splits[-1], rbounds[-1]), kind="table")
+    for ri in range(len(rbounds) - 1):
+        for ci in range(len(splits) - 1):
+            table.cells.append(Region(
+                bbox=(splits[ci], rbounds[ri], splits[ci + 1], rbounds[ri + 1]),
+                kind="flow", table_row=ri, table_col=ci))
+    return [table]
+
+
 def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: int = 3,
                              tol: float = 6.0, pad: float = 2.0) -> list[Region]:
     """Recover tables that have no drawn rules at all -- financial statements
@@ -410,11 +728,34 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
     #    alignment scatters values into columns that don't line up as
     #    densely.
     rules = [f.bbox for f in prim.fills if f.is_rule]
-    best_score, best_tables = 0.0, []
+
+    # Definition-list-style tables (a wide trailing cell wraps across many
+    # lines) are tried FIRST and take priority over the generic alignment
+    # voter below when both fire on the same region. The voter's per-span
+    # relaxation for long narrow spans (needed elsewhere for single-token
+    # cells) can itself get fooled here: a standard boilerplate phrase
+    # repeated at the start of nearly every VALUE cell (e.g. "(Optional;
+    # PDF 1.2)") recurs at a consistent x purely because it's the same
+    # phrase, not because it's a real column -- confirmed real case: the
+    # voter "succeeded" with a plausible-looking but wrong 4-column split,
+    # carving that boilerplate phrase into its own bogus column, while this
+    # dedicated detector (which never lets ANY continuation-line span vote
+    # at all, boilerplate or not) got the correct 3 columns for the same
+    # rows.
+    rule_fills = [f for f in prim.fills if f.is_rule]
+    row_wrapped = _detect_row_wrapped_tables(lines, min_rows, tol, pad, rule_fills)
+
+    best_score, voter_tables = 0.0, []
     for edge in (lambda s: s.bbox[2], lambda s: s.bbox[0]):
         score, tables = _detect_borderless_in_lines(lines, edge, min_rows, min_cols, tol, pad, rules)
         if tables and score > best_score:
-            best_score, best_tables = score, tables
+            best_score, voter_tables = score, tables
+
+    best_tables = list(row_wrapped)
+    for t in voter_tables:
+        if not any(containment(t.bbox, wt.bbox) > 0.3 or containment(wt.bbox, t.bbox) > 0.3
+                   for wt in row_wrapped):
+            best_tables.append(t)
     return best_tables
 
 
