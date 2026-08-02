@@ -125,6 +125,14 @@ def _is_box(f: Fill) -> bool:
     if not f.points:
         return False
     x0, y0, x1, y1 = f.bbox
+    # A real box has genuine 2D extent. A connector line has zero width or
+    # height, which collapses its four bbox "corners" onto its two
+    # endpoints -- so a line would otherwise match the corner test and be
+    # miscounted as a box (confirmed real case: a flowchart's horizontal
+    # and vertical connector lines all counted as boxes, leaving nothing
+    # as a line to detect connections from).
+    if min(x1 - x0, y1 - y0) < 3:
+        return False
     corners = {(round(x0, 1), round(y0, 1)), (round(x1, 1), round(y0, 1)),
               (round(x1, 1), round(y1, 1)), (round(x0, 1), round(y1, 1))}
     pts = {(round(x, 1), round(y, 1)) for x, y in f.points}
@@ -152,7 +160,16 @@ def detect_diagrams(prim: PagePrimitives, claimed: list[Rect], min_shapes: int =
     `claimed` (their regions), so a real table's border lines are never
     double-counted as a diagram.
     """
-    stroke_fills = [f for f in prim.fills if f.is_stroke and f.points
+    # Node/connector candidates: a flowchart node is either a stroked box
+    # (outline only) OR a filled colored panel (confirmed real cases of
+    # both -- one document draws its boxes as outlines, another fills them
+    # with pale colors); a connector is a thin rule or stroked line. Skip
+    # anything already claimed by a real table, and skip a near-full-page
+    # fill (a background tint is not a diagram node).
+    page_area = prim.width * prim.height
+    stroke_fills = [f for f in prim.fills
+                   if f.points and (f.is_stroke or f.is_panel)
+                   and f.area < page_area * 0.5
                    and not any(containment(f.bbox, c) > 0.5 for c in claimed)]
     if len(stroke_fills) < min_shapes:
         return []
@@ -222,6 +239,15 @@ def detect_diagrams(prim: PagePrimitives, claimed: list[Rect], min_shapes: int =
                 if a != b:
                     connections.add((a, b))
 
+        # Require at least one real box-to-box connection. This is the
+        # signal that separates a genuine flowchart from a page that merely
+        # has a couple of decorative colored panels near a separator rule:
+        # a flowchart's lines actually join its boxes, decorative ones
+        # don't. Text content is never lost either way (nodes are still
+        # captured as their own passage blocks), so demanding a connection
+        # only gates the "this is a diagram" claim, never the content.
+        if not connections:
+            continue
         x0 = min(f.bbox[0] for f in members); y0 = min(f.bbox[1] for f in members)
         x1 = max(f.bbox[2] for f in members); y1 = max(f.bbox[3] for f in members)
         out.append(DiagramVisual(bbox=(x0, y0, x1, y1), shapes=shapes,

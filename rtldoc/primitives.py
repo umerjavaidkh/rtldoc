@@ -281,9 +281,43 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
     return raw
 
 
+# Symbol/dingbat fonts whose character codes are pictographic, NOT the
+# Latin letters those codes nominally are. When such a font lacks a proper
+# ToUnicode map, extraction falls back to the raw code and emits a spurious
+# Latin letter -- e.g. ZapfDingbats code 0x49 (a filled bar/box glyph, used
+# as an overline for x-bar, as an emoji stand-in, or as a currency mark)
+# comes out as the letter "I", injecting garbage into the middle of words
+# and math ("compute x each time" -> "compute xI each time", "IIII" for a
+# run of emoji). Confirmed across three independent documents.
+_SYMBOL_FONTS = ("dingbat", "wingding", "webding")
+
+
+def _drop_symbol_font_letters(raw: dict) -> dict:
+    """Remove characters that a symbol/dingbat font emitted as bare ASCII
+    letters -- those are pictographs mis-decoded as text, never real
+    content. Scoped tightly: only ASCII letters (A-Z, a-z) from a known
+    symbol font are dropped, so a symbol font's legitimately-mapped Unicode
+    (Greek/math glyphs like the Symbol font's U+221A square root) is
+    untouched."""
+    for block in raw.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                font = span.get("font", "").lower()
+                if not any(sf in font for sf in _SYMBOL_FONTS):
+                    continue
+                chars = span.get("chars")
+                if not chars:
+                    continue
+                span["chars"] = [ch for ch in chars if not ch.get("c", "").isascii()
+                                 or not ch.get("c", "").isalpha()]
+    return raw
+
+
 def rawdict(page: "fitz.Page") -> dict:
     raw = page.get_text("rawdict", flags=_RAWDICT_FLAGS)
-    return _fix_broken_space_glyphs(page, raw)
+    return _drop_symbol_font_letters(_fix_broken_space_glyphs(page, raw))
 
 
 def _block_text(block: dict) -> str:

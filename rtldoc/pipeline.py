@@ -403,10 +403,20 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     # table cell grid is authoritative.
     quality: dict[int, int] = {}
     table_grids: dict[int, list] = {}
+    dropped_tables: set[int] = set()
     for r in regions:
         grid = None
         if r.kind == "table":
             text, diag, grid = _table_text(r, owned, opts)
+            # A "table" with no text in any cell is never a real table -- it
+            # is a false positive from stray rules (confirmed real case: a
+            # flowchart's thin connector lines, classified as rule fills,
+            # got clustered into an empty 1-cell grid). Drop it entirely,
+            # and remember it so the diagram detector, which skips
+            # table-claimed areas, can still describe the shapes there.
+            if not text.strip():
+                dropped_tables.add(id(r))
+                continue
             table_grids[id(r)] = grid
             q = 3
         elif geo_lines:
@@ -456,7 +466,8 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
 
     if visual_summary:
         try:
-            result.visual = visual.describe_page(page, prim, regions, table_grids, result.columns)
+            live_regions = [r for r in regions if id(r) not in dropped_tables]
+            result.visual = visual.describe_page(page, prim, live_regions, table_grids, result.columns)
         except Exception:
             result.visual = None
 
