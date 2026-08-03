@@ -549,7 +549,23 @@ def extract_page(page: "fitz.Page", drop_white_fills: bool = True,
         if rgb is None:
             continue
         if drop_white_fills and _near_white(rgb):
-            continue
+            # A flowchart node is routinely drawn white-filled with a dark
+            # (or otherwise non-white) BORDER -- "fs" with a real, visibly
+            # non-white stroke is a genuine bordered box even though its
+            # own fill happens to be white, and dropping it here treats a
+            # perfectly visible shape as if it were blank (confirmed real
+            # case: an org-chart diagram's ~15 node boxes were ALL drawn
+            # this way -- white fill, dark stroke, real 2D area, not
+            # degenerate -- and every one of them vanished from the
+            # extracted geometry, leaving only the 2 shapes that happened
+            # to use a non-white fill instead). A genuine blank background
+            # tint (no meaningful border, or a border that's ALSO
+            # near-white) still gets dropped exactly as before.
+            stroke_rgb = d.get("color") if dtype == "fs" else None
+            if stroke_rgb is not None and not _near_white(stroke_rgb):
+                rgb = stroke_rgb
+            else:
+                continue
         # A full-page background tint (sometimes drawn with bleed, extending
         # past the crop box entirely) is not a semantic container -- a real
         # content panel (a reading-passage callout, an answer-key box) never

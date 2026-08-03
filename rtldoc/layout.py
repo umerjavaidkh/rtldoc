@@ -514,10 +514,38 @@ def _detect_row_wrapped_in_frame(lines: list[list[Span]], min_rows: int, tol: fl
     # starting further right is a row's own wrapped continuation, not a
     # new row (a real table's label column always sits left of its data).
     key_cluster = min(real, key=lambda c: sum(c["xs"]) / len(c["xs"]))
-    row_start_lines = sorted(key_cluster["lines"])
-    if len(row_start_lines) < key_min_rows:
+    row_start_lines_all = sorted(key_cluster["lines"])
+    if len(row_start_lines_all) < key_min_rows:
         return []
     key_x = sum(key_cluster["xs"]) / len(key_cluster["xs"])
+
+    # This book's own convention reprints an identical literal header row
+    # ("KEY TYPE VALUE") at the top of EVERY table, even when two entirely
+    # separate tables happen to share the exact same page margins -- which
+    # is the common case here, since nearly every parameter-dictionary
+    # table in the whole book uses the same x0/x1. Grouping rules by
+    # shared x-extent (the caller) then pulls BOTH tables' rules into one
+    # cluster, and the leftmost-margin vote above pulls both tables' KEY
+    # columns into one combined row_start_lines set -- silently welding two
+    # unrelated tables into one (confirmed real case: Table 3.43 and Table
+    # 3.44 on the same page, with genuinely different TYPE-column widths,
+    # got merged this way and the whole detection aborted outright, since
+    # neither table's own consistent column layout survived the merge).
+    # An EXACT repeat of the very first row-start line's own text is what
+    # marks a second table's own header beginning -- not just "this line's
+    # cells all happen to look short," which a legitimately short DATA row
+    # could also satisfy; requiring an exact match keeps this from ever
+    # misfiring on a real row within a single table.
+    def _row_text(li: int) -> str:
+        return " ".join(s.text.strip() for s in sorted(lines[li], key=lambda s: s.bbox[0]))
+
+    header_text = _row_text(row_start_lines_all[0])
+    row_groups: list[list[int]] = [[row_start_lines_all[0]]]
+    for li in row_start_lines_all[1:]:
+        if _row_text(li) == header_text:
+            row_groups.append([li])
+        else:
+            row_groups[-1].append(li)
 
     # A genuine KEY column names a DIFFERENT parameter/entry each row; a
     # bulleted list's leading marker ("•") recurs at a fixed left margin
@@ -530,166 +558,229 @@ def _detect_row_wrapped_in_frame(lines: list[list[Span]], min_rows: int, tol: fl
     # line plus three bulleted sub-items had exactly 2 distinct key texts
     # ("FIGURE 9.15" and the bullet glyph) across 4 rows, which cleared a
     # bare ">1 distinct" bar while still being 75% the same repeated glyph.
-    key_texts_list = [min(lines[li], key=lambda s: s.bbox[0]).text.strip() for li in row_start_lines]
-    if len(set(key_texts_list)) / len(key_texts_list) <= 0.5:
-        return []
+    def _build_one(row_start_lines: list[int], group_last_line: int) -> Region | None:
+        # A genuine KEY column names a DIFFERENT parameter/entry each row; a
+        # bulleted list's leading marker ("•") recurs at a fixed left margin
+        # too but is the SAME literal glyph every row, which is what actually
+        # distinguishes a real label column from a bullet list wrapping across
+        # many lines (confirmed real case: a bulleted list of stream-object
+        # rules was read as a table whose single "KEY" was always "•").
+        # A strict majority-unique test (not just "more than one distinct value
+        # ever appears") is needed -- confirmed real case: a figure caption
+        # line plus three bulleted sub-items had exactly 2 distinct key texts
+        # ("FIGURE 9.15" and the bullet glyph) across 4 rows, which cleared a
+        # bare ">1 distinct" bar while still being 75% the same repeated glyph.
+        key_texts_list = [min(lines[li], key=lambda s: s.bbox[0]).text.strip() for li in row_start_lines]
+        if len(set(key_texts_list)) / len(key_texts_list) <= 0.5:
+            return None
 
-    # The ratio test above can still be diluted below its own threshold by
-    # unrelated ORDINARY PROSE lines that happen to share the recurring
-    # margin too (any two different prose lines are, trivially, distinct
-    # text) -- confirmed real case: a figure caption's own bullet list sat
-    # at the exact same x as two ordinary paragraph lines just above it (the
-    # page's default body-text margin), and those two genuinely-different
-    # sentences were enough "distinct" values to clear the 0.5 ratio despite
-    # the bullet itself repeating 3 times. A repeated key that is a short,
-    # non-alphanumeric glyph (a bullet, dash, or similar marker) is never a
-    # real parameter/entry name no matter how the overall ratio comes out.
-    most_common_text, most_common_count = Counter(key_texts_list).most_common(1)[0]
-    if most_common_count > 1 and len(most_common_text) <= 2 and not most_common_text.isalnum():
-        return []
+        # The ratio test above can still be diluted below its own threshold by
+        # unrelated ORDINARY PROSE lines that happen to share the recurring
+        # margin too (any two different prose lines are, trivially, distinct
+        # text) -- confirmed real case: a figure caption's own bullet list sat
+        # at the exact same x as two ordinary paragraph lines just above it (the
+        # page's default body-text margin), and those two genuinely-different
+        # sentences were enough "distinct" values to clear the 0.5 ratio despite
+        # the bullet itself repeating 3 times. A repeated key that is a short,
+        # non-alphanumeric glyph (a bullet, dash, or similar marker) is never a
+        # real parameter/entry name no matter how the overall ratio comes out.
+        most_common_text, most_common_count = Counter(key_texts_list).most_common(1)[0]
+        if most_common_count > 1 and len(most_common_text) <= 2 and not most_common_text.isalnum():
+            return None
 
-    # Consistent short columns after KEY (TYPE, and sometimes a further one
-    # like an "OPI COMMENT" name), discovered one position at a time --
-    # voted ONLY from row-start lines' own span at that position, so noise
-    # from continuation-line prose keywords never enters this vote at all
-    # (it only ever looks at lines already confirmed as row starts).
-    # Confirmed real case: a 4-column dictionary -- KEY | TYPE | OPI COMMENT
-    # | VALUE -- needs two extra columns found this way, not just one.
-    extra_col_xs: list[float] = []
-    pos = 1
-    while True:
-        pos_spans = []
-        for li in row_start_lines:
-            ln = sorted(lines[li], key=lambda s: s.bbox[0])
-            if len(ln) > pos and len(ln[pos].text.strip()) <= _CELL_MAX_CHARS:
-                pos_spans.append(ln[pos])
-        if len(pos_spans) < max(key_min_rows, int(len(row_start_lines) * 0.6)):
-            break
-        # A short span's OWN leading phrase (an italicized "(Optional)", a
-        # PDF-version qualifier like "(Optional; PDF 1.2)") is routinely
-        # split from the rest of the sentence into its own span purely by
-        # styling -- that qualifier is still the START of the VALUE cell,
-        # not a genuine further column. Every real TYPE/OPI-COMMENT-style
-        # column value in this book's parameter dictionaries is a bare
-        # word or identifier; a PARENTHESIZED qualifier is never one --
-        # checking the candidate span's own leading character, rather than
-        # trying to characterize whatever text happens to follow it (which
-        # is unreliable: a real column's own trailing VALUE prose follows
-        # it too, and looks the same locally), is what actually tells them
-        # apart (confirmed real case: "(Optional)" was wrongly kept as an
-        # extra column using a "does long prose follow" test, since real
-        # TYPE columns like "boolean" are ALSO immediately followed by the
-        # row's genuine long VALUE prose -- that pattern alone can't
-        # distinguish a real last column from a fake one).
-        if sum(1 for s in pos_spans if s.text.strip().startswith("(")) > len(pos_spans) * 0.5:
-            break
-        xs = sorted(s.bbox[0] for s in pos_spans)
-        if xs[-1] - xs[0] > tol * 2:
-            break
-        extra_col_xs.append(sum(xs) / len(xs))
-        pos += 1
+        # Consistent short columns after KEY (TYPE, and sometimes a further one
+        # like an "OPI COMMENT" name), discovered one position at a time --
+        # voted ONLY from row-start lines' own span at that position, so noise
+        # from continuation-line prose keywords never enters this vote at all
+        # (it only ever looks at lines already confirmed as row starts).
+        # Confirmed real case: a 4-column dictionary -- KEY | TYPE | OPI COMMENT
+        # | VALUE -- needs two extra columns found this way, not just one.
+        extra_col_xs: list[float] = []
+        pos = 1
+        while True:
+            pos_spans = []
+            for li in row_start_lines:
+                ln = sorted(lines[li], key=lambda s: s.bbox[0])
+                if len(ln) > pos and len(ln[pos].text.strip()) <= _CELL_MAX_CHARS:
+                    pos_spans.append(ln[pos])
+            if len(pos_spans) < max(key_min_rows, int(len(row_start_lines) * 0.6)):
+                break
+            # A short span's OWN leading phrase (an italicized "(Optional)", a
+            # PDF-version qualifier like "(Optional; PDF 1.2)") is routinely
+            # split from the rest of the sentence into its own span purely by
+            # styling -- that qualifier is still the START of the VALUE cell,
+            # not a genuine further column. Every real TYPE/OPI-COMMENT-style
+            # column value in this book's parameter dictionaries is a bare
+            # word or identifier; a PARENTHESIZED qualifier is never one --
+            # checking the candidate span's own leading character, rather than
+            # trying to characterize whatever text happens to follow it (which
+            # is unreliable: a real column's own trailing VALUE prose follows
+            # it too, and looks the same locally), is what actually tells them
+            # apart (confirmed real case: "(Optional)" was wrongly kept as an
+            # extra column using a "does long prose follow" test, since real
+            # TYPE columns like "boolean" are ALSO immediately followed by the
+            # row's genuine long VALUE prose -- that pattern alone can't
+            # distinguish a real last column from a fake one).
+            if sum(1 for s in pos_spans if s.text.strip().startswith("(")) > len(pos_spans) * 0.5:
+                break
+            xs = sorted(s.bbox[0] for s in pos_spans)
+            if xs[-1] - xs[0] > tol * 2:
+                break
+            extra_col_xs.append(sum(xs) / len(xs))
+            pos += 1
 
-    # This detector's whole premise is a genuine KEY/TYPE(/.../VALUE
-    # definition table -- a real TYPE-like column recurring right after
-    # KEY on every row. Without at least one, "recurring left margin" is
-    # too weak a signal on its own and starts matching page furniture that
-    # has nothing to do with a table at all (confirmed real case: a
-    # figure's caption line and the NEXT section's heading happened to sit
-    # at a similar indent below an image frame's top/bottom border rules,
-    # with no TYPE-like column anywhere -- everything between them,
-    # including an unrelated bulleted list, got welded into one bogus
-    # "value" cell).
-    if not extra_col_xs:
-        return []
+        # This detector's whole premise is a genuine KEY/TYPE(/.../VALUE
+        # definition table -- a real TYPE-like column recurring right after
+        # KEY on every row. Without at least one, "recurring left margin" is
+        # too weak a signal on its own and starts matching page furniture that
+        # has nothing to do with a table at all (confirmed real case: a
+        # figure's caption line and the NEXT section's heading happened to sit
+        # at a similar indent below an image frame's top/bottom border rules,
+        # with no TYPE-like column anywhere -- everything between them,
+        # including an unrelated bulleted list, got welded into one bogus
+        # "value" cell).
+        if not extra_col_xs:
+            return None
 
-    # Abstain if the discovered extra column(s) ALSO recur on the wrapped
-    # CONTINUATION lines (not just the row-start line) -- that means the
-    # "extra column" is actually its own independently-wrapping data
-    # column (several data columns, each listing its own values down
-    # multiple lines in lockstep), a genuinely wider multi-column grid
-    # this detector's model can't represent, not a "label(s) + one wrapped
-    # trailing value" table (confirmed real case: a 4-column algorithm-
-    # support matrix -- SubFilter value | three digest-algorithm columns --
-    # had each of its 3 extra columns list several stacked values down
-    # subsequent lines, and welding those into one trailing cell garbled
-    # the whole table). In a genuine definition table, only the FINAL
-    # (VALUE) cell ever continues past its row-start line; TYPE/OPI-COMMENT
-    # -like columns appear exactly once per row.
-    continuation_lines = [li for lo, hi in
-                          [(row_start_lines[i], (row_start_lines[i + 1] - 1 if i + 1 < len(row_start_lines) else lo))
-                           for i, lo in enumerate(row_start_lines)]
-                          for li in range(lo + 1, hi + 1)]
-    touches = sum(1 for li in continuation_lines
-                 if any(abs(s.bbox[0] - cx) <= tol for s in lines[li] for cx in extra_col_xs))
-    if continuation_lines and touches / len(continuation_lines) > 0.15:
-        return []
+        # Abstain if the discovered extra column(s) ALSO recur on the wrapped
+        # CONTINUATION lines (not just the row-start line) -- that means the
+        # "extra column" is actually its own independently-wrapping data
+        # column (several data columns, each listing its own values down
+        # multiple lines in lockstep), a genuinely wider multi-column grid
+        # this detector's model can't represent, not a "label(s) + one wrapped
+        # trailing value" table (confirmed real case: a 4-column algorithm-
+        # support matrix -- SubFilter value | three digest-algorithm columns --
+        # had each of its 3 extra columns list several stacked values down
+        # subsequent lines, and welding those into one trailing cell garbled
+        # the whole table). In a genuine definition table, only the FINAL
+        # (VALUE) cell ever continues past its row-start line; TYPE/OPI-COMMENT
+        # -like columns appear exactly once per row.
+        continuation_lines = [li for lo, hi in
+                              [(row_start_lines[i], (row_start_lines[i + 1] - 1 if i + 1 < len(row_start_lines) else lo))
+                               for i, lo in enumerate(row_start_lines)]
+                              for li in range(lo + 1, hi + 1)]
+        touches = sum(1 for li in continuation_lines
+                     if any(abs(s.bbox[0] - cx) <= tol for s in lines[li] for cx in extra_col_xs))
+        if continuation_lines and touches / len(continuation_lines) > 0.15:
+            return None
 
-    frame_line_idxs = [li for li, ln in enumerate(lines) if ln and
-                       framed_lo - tol <= (min(s.bbox[1] for s in ln) + max(s.bbox[3] for s in ln)) / 2
-                       <= framed_hi + tol]
-    last_frame_line = max(frame_line_idxs) if frame_line_idxs else row_start_lines[-1]
+        # Bounded by group_last_line, not just the raw frame's own extent --
+        # a LATER group's row_start_lines (a second, genuinely separate
+        # table sharing this same rule frame) must never be swallowed into
+        # this group's own last row's trailing wrapped cell (confirmed real
+        # case: Table 3.43's last row absorbed Table 3.44's header AND all
+        # its data rows into one giant VALUE cell, because the frame-wide
+        # last line was used for every group instead of stopping at the
+        # boundary between them).
+        frame_line_idxs = [li for li, ln in enumerate(lines) if ln and li <= group_last_line and
+                           framed_lo - tol <= (min(s.bbox[1] for s in ln) + max(s.bbox[3] for s in ln)) / 2
+                           <= framed_hi + tol]
+        last_frame_line = max(frame_line_idxs) if frame_line_idxs else row_start_lines[-1]
 
-    bands: list[tuple[int, int]] = []
-    for i, lo in enumerate(row_start_lines):
-        hi = row_start_lines[i + 1] - 1 if i + 1 < len(row_start_lines) else last_frame_line
-        bands.append((lo, hi))
+        bands: list[tuple[int, int]] = []
+        for i, lo in enumerate(row_start_lines):
+            hi = row_start_lines[i + 1] - 1 if i + 1 < len(row_start_lines) else last_frame_line
+            bands.append((lo, hi))
 
-    # This detector exists specifically for rows whose trailing cell wraps
-    # across multiple lines -- if most "rows" turn out to be a single line
-    # each, the leftmost-span voting has actually just rediscovered an
-    # ORDINARY paragraph's own left margin (every line of a left-justified
-    # paragraph starts at the same x, which trivially "recurs" and passes
-    # the diversity check too, since each line begins with a different
-    # word) rather than a real table (confirmed real case: a plain prose
-    # paragraph below an unrelated small table, opened up by the no-
-    # closing-rule retry above, got read as a table with one bogus 1-line
-    # "row" per paragraph line). The table's own HEADER band ("KEY TYPE
-    # VALUE") is excluded from this check -- it never wraps, even in a
-    # genuine table, and a table with only a header plus a single (however
-    # long) real row is still just 1 of 1 DATA bands to judge, which must
-    # not be diluted by an always-non-wrapping header into looking like a
-    # majority failure.
-    data_bands = bands[1:]
-    if data_bands and (sum(1 for lo, hi in data_bands if hi > lo)
-                       < max(1, len(data_bands) * 0.5)):
-        return []
+        # This detector exists specifically for rows whose trailing cell CAN
+        # wrap across multiple lines -- if NONE of them ever do, the
+        # leftmost-span voting has actually just rediscovered an ORDINARY
+        # paragraph's own left margin (every line of a left-justified
+        # paragraph starts at the same x, which trivially "recurs" and passes
+        # the diversity check too, since each line begins with a different
+        # word) rather than a real table (confirmed real case: a plain prose
+        # paragraph below an unrelated small table, opened up by the no-
+        # closing-rule retry above, got read as a table with one bogus 1-line
+        # "row" per paragraph line). Requiring at least ONE real wrap, not a
+        # MAJORITY, is what the check is actually testing for: an ordinary
+        # misread paragraph can never show even a single wrapping band (by
+        # construction, every one of its lines independently qualifies as
+        # its own row-start), so any real wrap at all already rules that out
+        # -- confirmed real case: a legitimate table mixing short one-line
+        # entries (a boolean flag, a short date) with a couple of genuinely
+        # long-wrapping ones had only 2 of 5 data rows wrap (40%), well under
+        # a bare-majority bar, and was wrongly rejected outright. The table's
+        # own HEADER band ("KEY TYPE VALUE") is excluded from this check --
+        # it never wraps, even in a genuine table.
+        data_bands = bands[1:]
+        if data_bands and not any(hi > lo for lo, hi in data_bands):
+            return None
 
-    band_spans = [[s for li in range(lo, hi + 1) for s in lines[li]] for lo, hi in bands]
-    all_band_spans = [s for spans in band_spans for s in spans]
-    if not all_band_spans:
-        return []
+        band_spans = [[s for li in range(lo, hi + 1) for s in lines[li]] for lo, hi in bands]
+        all_band_spans = [s for spans in band_spans for s in spans]
+        if not all_band_spans:
+            return None
 
-    key_members = [s for spans in band_spans for s in spans if abs(s.bbox[0] - key_x) <= tol]
-    key_extent = (min(s.bbox[0] for s in key_members), max(s.bbox[2] for s in key_members))
-    table_x0 = min(s.bbox[0] for s in all_band_spans)
-    table_x1 = max(s.bbox[2] for s in all_band_spans)
+        key_members = [s for spans in band_spans for s in spans if abs(s.bbox[0] - key_x) <= tol]
+        key_extent = (min(s.bbox[0] for s in key_members), max(s.bbox[2] for s in key_members))
+        table_x0 = min(s.bbox[0] for s in all_band_spans)
+        table_x1 = max(s.bbox[2] for s in all_band_spans)
 
-    splits = [table_x0]
-    prev_extent = key_extent
-    for cx in extra_col_xs:
-        members = [s for spans in band_spans for s in spans if abs(s.bbox[0] - cx) <= tol]
-        if not members:
+        splits = [table_x0]
+        prev_extent = key_extent
+        for cx in extra_col_xs:
+            members = [s for spans in band_spans for s in spans if abs(s.bbox[0] - cx) <= tol]
+            if not members:
+                continue
+            extent = (min(s.bbox[0] for s in members), max(s.bbox[2] for s in members))
+            splits.append((prev_extent[1] + extent[0]) / 2)
+            prev_extent = extent
+        splits.append(max(prev_extent[1] + pad, splits[-1] + pad))
+        splits.append(max(splits[-1], table_x1))
+
+        rbounds = [min(s.bbox[1] for s in all_band_spans) - pad]
+        for i in range(len(bands) - 1):
+            this_bot = max(s.bbox[3] for s in band_spans[i])
+            next_top = min(s.bbox[1] for s in band_spans[i + 1])
+            rbounds.append((this_bot + next_top) / 2)
+        rbounds.append(max(s.bbox[3] for s in all_band_spans) + pad)
+
+        table = Region(bbox=(splits[0], rbounds[0], splits[-1], rbounds[-1]), kind="table")
+        for ri in range(len(rbounds) - 1):
+            for ci in range(len(splits) - 1):
+                table.cells.append(Region(
+                    bbox=(splits[ci], rbounds[ri], splits[ci + 1], rbounds[ri + 1]),
+                    kind="flow", table_row=ri, table_col=ci))
+        return table
+
+    global_frame_line_idxs = [li for li, ln in enumerate(lines) if ln and
+                              framed_lo - tol <= (min(s.bbox[1] for s in ln) + max(s.bbox[3] for s in ln)) / 2
+                              <= framed_hi + tol]
+    global_last_line = max(global_frame_line_idxs) if global_frame_line_idxs else row_start_lines_all[-1]
+
+    out: list[Region] = []
+    for gi, row_start_lines in enumerate(row_groups):
+        if len(row_start_lines) < key_min_rows:
             continue
-        extent = (min(s.bbox[0] for s in members), max(s.bbox[2] for s in members))
-        splits.append((prev_extent[1] + extent[0]) / 2)
-        prev_extent = extent
-    splits.append(max(prev_extent[1] + pad, splits[-1] + pad))
-    splits.append(max(splits[-1], table_x1))
-
-    rbounds = [min(s.bbox[1] for s in all_band_spans) - pad]
-    for i in range(len(bands) - 1):
-        this_bot = max(s.bbox[3] for s in band_spans[i])
-        next_top = min(s.bbox[1] for s in band_spans[i + 1])
-        rbounds.append((this_bot + next_top) / 2)
-    rbounds.append(max(s.bbox[3] for s in all_band_spans) + pad)
-
-    table = Region(bbox=(splits[0], rbounds[0], splits[-1], rbounds[-1]), kind="table")
-    for ri in range(len(rbounds) - 1):
-        for ci in range(len(splits) - 1):
-            table.cells.append(Region(
-                bbox=(splits[ci], rbounds[ri], splits[ci + 1], rbounds[ri + 1]),
-                kind="flow", table_row=ri, table_col=ci))
-    return [table]
+        # This group's own last row must stop before the NEXT group's first
+        # row-start line (a separate table's own header), not run all the
+        # way to the shared frame's global extent.
+        if gi + 1 < len(row_groups):
+            next_start = row_groups[gi + 1][0]
+            group_last_line = next_start - 1
+            # Prefer this table's OWN closing rule, if one exists in the gap,
+            # over blindly running all the way to just before the next
+            # table's header -- an unrelated paragraph routinely sits
+            # between the two (confirmed real case: "For Mac OS files, the
+            # Mac entry..." plus the next table's own caption line, both
+            # sitting between Table 3.43's real last row and Table 3.44's
+            # header, got swallowed whole into that last row's VALUE cell
+            # otherwise).
+            lo_y = min(s.bbox[1] for s in lines[row_start_lines[-1]])
+            hi_y = min(s.bbox[1] for s in lines[next_start]) if lines[next_start] else lo_y
+            closing_ys = [f.bbox[1] for f in rule_cluster if lo_y - tol <= f.bbox[1] <= hi_y + tol]
+            if closing_ys:
+                cut_y = min(closing_ys)
+                cut_line = next((li for li in range(next_start - 1, row_start_lines[-1] - 1, -1)
+                                 if lines[li] and max(s.bbox[3] for s in lines[li]) <= cut_y + tol), None)
+                if cut_line is not None:
+                    group_last_line = cut_line
+        else:
+            group_last_line = global_last_line
+        table = _build_one(row_start_lines, group_last_line)
+        if table is not None:
+            out.append(table)
+    return out
 
 
 def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: int = 3,

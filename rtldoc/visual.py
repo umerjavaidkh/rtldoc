@@ -19,7 +19,6 @@ pattern (see layout._cluster_rules).
 
 from __future__ import annotations
 
-import html
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -42,10 +41,6 @@ class DiagramShape:
     bbox: Rect
     color: tuple[float, float, float]
     label: str = ""
-    # The line's own drawn path (bends and all) -- needed to actually draw
-    # it back out; a bbox alone flattens a bent connector into a straight
-    # diagonal. None for box shapes, where the bbox alone is the shape.
-    points: tuple[tuple[float, float], ...] | None = None
 
 
 @dataclass
@@ -53,13 +48,6 @@ class DiagramVisual:
     bbox: Rect
     shapes: list[DiagramShape] = field(default_factory=list)
     connections: list[tuple[str, str]] = field(default_factory=list)
-    # A rasterized crop of this exact region, straight off the page's own
-    # renderer -- correct for ANY diagram regardless of how many boxes,
-    # branches, or curved paths it has, since it's a pixel-accurate capture
-    # rather than a semantic box/line reconstruction. The box+line model
-    # above (shapes/connections) only reconstructs cleanly for simple
-    # flowcharts; this crop is what stays right even when that doesn't.
-    crop_png_b64: str | None = None
 
 
 @dataclass
@@ -116,22 +104,6 @@ def _pixmap_colors(pix: "object", k: int = 3) -> tuple[list[str], float]:
     return top, min(1.0, diversity)
 
 
-def _render_crop_png(page: "object", bbox: Rect, pad: float = 4.0, zoom: float = 2.0) -> str:
-    """Rasterize exactly this region of the page via PyMuPDF's own renderer
-    -- the same renderer that draws the whole page, so it reproduces any
-    curve, gradient, or fine detail correctly regardless of how complex the
-    underlying vector art is. Returned as a base64 PNG data URI payload so
-    the HTML/JSON output stays self-contained (no extra image files to
-    track alongside embedded page images, which are looked up by xref
-    instead)."""
-    import base64
-    import fitz
-    x0, y0, x1, y1 = bbox
-    clip = fitz.Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad) & page.rect
-    pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(zoom, zoom))
-    return base64.b64encode(pix.tobytes("png")).decode("ascii")
-
-
 def describe_image(page: "object", bbox: Rect, zoom: float = 1.0) -> ImageVisual:
     """Render just this figure's own region to get exact pixel dimensions
     and color stats -- cheaper and more precise than parsing the original
@@ -168,7 +140,25 @@ def _is_box(f: Fill) -> bool:
 
 
 def _nearest_label(bbox: Rect, spans, max_dist: float = 60.0) -> str:
-    cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+    # A box's own label routinely wraps across 2+ lines ("Content" /
+    # "stream") -- picking only the SINGLE nearest span truncates it to
+    # whichever line happens to sit closest to the box's centroid
+    # (confirmed real case: an org-chart's boxes came out labeled "entry",
+    # "stream", "destinations", "threads" -- each missing its own first
+    # word). Every span whose own center falls inside the box belongs to
+    # its label; join them in reading order.
+    x0, y0, x1, y1 = bbox
+    pad = 2.0
+    inside = [s for s in spans if s.text.strip()
+             and x0 - pad <= (s.bbox[0] + s.bbox[2]) / 2 <= x1 + pad
+             and y0 - pad <= (s.bbox[1] + s.bbox[3]) / 2 <= y1 + pad]
+    if inside:
+        inside.sort(key=lambda s: (round(s.bbox[1]), s.bbox[0]))
+        return " ".join(s.text.strip() for s in inside)
+    # No text sits inside this shape at all (an unboxed diagram node, or a
+    # connector with a nearby external label) -- fall back to the single
+    # closest span outside it.
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
     best, best_d = "", max_dist
     for s in spans:
         if not s.text.strip():
@@ -194,9 +184,23 @@ def detect_diagrams(prim: PagePrimitives, claimed: list[Rect], min_shapes: int =
     # with pale colors); a connector is a thin rule or stroked line. Skip
     # anything already claimed by a real table, and skip a near-full-page
     # fill (a background tint is not a diagram node).
+    # is_rule fills are ALSO included -- a diagram's own boxes are routinely
+    # drawn as thin rule-bordered rectangles (the exact same drawing style
+    # tables use for their cell borders), not stroke-only outlines or
+    # filled panels (confirmed real case: a public-key-encryption diagram's
+    # boxes were all is_rule fills, and detect_diagrams found nothing at
+    # all -- not even a wrong guess -- since none of its shapes passed the
+    # is_stroke/is_panel filter). This is safe against misreading a real
+    # TABLE as a diagram for two separate reasons: (1) `claimed` already
+    # excludes any region the table detector -- itself extensively
+    # validated -- already claimed; (2) _is_box below requires genuine 2D
+    # extent (min(w,h) >= 3), which a table's rule segments essentially
+    # never have on their own (a row/column divider is drawn as a single
+    # degenerate thin line, not an enclosed rectangle) -- so a rule-bordered
+    # TABLE's individual dividers still can't masquerade as diagram boxes.
     page_area = prim.width * prim.height
     stroke_fills = [f for f in prim.fills
-                   if f.points and (f.is_stroke or f.is_panel)
+                   if f.points and (f.is_stroke or f.is_panel or f.is_rule)
                    and f.area < page_area * 0.5
                    and not any(containment(f.bbox, c) > 0.5 for c in claimed)]
     if len(stroke_fills) < min_shapes:
@@ -248,7 +252,7 @@ def detect_diagrams(prim: PagePrimitives, claimed: list[Rect], min_shapes: int =
             label = _nearest_label(f.bbox, prim.spans)
             shapes.append(DiagramShape(kind="box", bbox=f.bbox, color=f.color, label=label))
         for f in lines:
-            shapes.append(DiagramShape(kind="line", bbox=f.bbox, color=f.color, points=f.points))
+            shapes.append(DiagramShape(kind="line", bbox=f.bbox, color=f.color))
 
         # infer connections: a line's own points, each close to some box's
         # own boundary, mean that line joins those boxes.
@@ -372,61 +376,25 @@ def detect_diagrams(prim: PagePrimitives, claimed: list[Rect], min_shapes: int =
     return out
 
 
-def render_diagram_svg(d: DiagramVisual, pad: float = 12.0) -> str:
-    """Redraw a detected diagram as inline SVG, from the exact same
-    geometry the text description above is built from -- box positions,
-    line paths (bends included, not flattened to a straight bbox
-    diagonal), and colors, all read directly off the PDF's own drawing
-    commands. Not a reconstruction from the description text; the same
-    underlying shapes feed both.
+def render_diagram_mermaid(d: DiagramVisual) -> str:
+    """Emit Mermaid flowchart syntax for a detected diagram -- an actual
+    auto-laid-out chart from a real diagramming library (rendered
+    client-side by Mermaid.js), not a pixel copy of the page and not a
+    from-scratch coordinate reconstruction. Only the NODE LABELS and the
+    detected CONNECTIONS feed this; Mermaid does its own layout entirely.
     """
-    x0, y0, x1, y1 = d.bbox
-    x0 -= pad; y0 -= pad; x1 += pad; y1 += pad
-    w, h = x1 - x0, y1 - y0
-    parts = [
-        f'<svg viewBox="{x0:.1f} {y0:.1f} {w:.1f} {h:.1f}" '
-        f'xmlns="http://www.w3.org/2000/svg" class="diagram-svg" '
-        f'style="max-width:100%;height:auto;border:1px solid #ddd;background:#fff">',
-        '<defs><marker id="rtldoc-arrow" viewBox="0 0 10 10" refX="8" refY="5" '
-        'markerWidth="6" markerHeight="6" orient="auto-start-reverse">'
-        '<path d="M0,0 L10,5 L0,10 z" fill="#555"/></marker></defs>',
-    ]
-    for s in d.shapes:
-        if s.kind != "line" or not s.points:
-            continue
-        pts = " ".join(f"{px:.1f},{py:.1f}" for px, py in s.points)
-        # A DETOUR path (a bracket joining two side-by-side boxes to a
-        # shared trunk, say) has no trustworthy direction of its own --
-        # which endpoint an arrowhead lands on is just an artifact of
-        # which end happens to be listed last in its raw point data, not a
-        # real "flow goes here" signal (this is exactly why the connection
-        # inference above never asserts an edge from a detour line either;
-        # the drawing must not visually claim one it doesn't make in text).
-        # A STRAIGHT segment's direction is trustworthy -- draw its arrow.
-        marker = ""
-        if len(s.points) >= 2:
-            path_len = sum(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
-                          for (x1, y1), (x2, y2) in zip(s.points, s.points[1:]))
-            (sx, sy), (ex, ey) = s.points[0], s.points[-1]
-            straight = ((ex - sx) ** 2 + (ey - sy) ** 2) ** 0.5
-            if straight == 0 or path_len <= straight * 1.3:
-                marker = ' marker-end="url(#rtldoc-arrow)"'
-        parts.append(f'<polyline points="{pts}" fill="none" stroke="{_hex(s.color)}" '
-                    f'stroke-width="1.2"{marker}/>')
-    for s in d.shapes:
-        if s.kind != "box":
-            continue
-        bx0, by0, bx1, by1 = s.bbox
-        parts.append(f'<rect x="{bx0:.1f}" y="{by0:.1f}" width="{bx1 - bx0:.1f}" '
-                    f'height="{by1 - by0:.1f}" fill="none" stroke="{_hex(s.color)}" '
-                    f'stroke-width="1.2"/>')
-        if s.label:
-            cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
-            parts.append(f'<text x="{cx:.1f}" y="{cy:.1f}" text-anchor="middle" '
-                        f'dominant-baseline="middle" font-size="9" font-family="sans-serif" '
-                        f'fill="{_hex(s.color)}">{html.escape(s.label)}</text>')
-    parts.append('</svg>')
-    return "".join(parts)
+    boxes = [s for s in d.shapes if s.kind == "box"]
+    node_id = {}
+    lines = ["flowchart TD"]
+    for i, s in enumerate(boxes):
+        node_id[s.label or f"box{i}"] = chr(ord("A") + i) if i < 26 else f"N{i}"
+    for label, nid in node_id.items():
+        safe = label.replace('"', "'") or "unlabeled"
+        lines.append(f'    {nid}["{safe}"]')
+    for a, b in d.connections:
+        if a in node_id and b in node_id:
+            lines.append(f"    {node_id[a]} --> {node_id[b]}")
+    return "\n".join(lines)
 
 
 def describe_table(bbox: Rect, grid: list[list[str]]) -> TableVisual:
@@ -498,11 +466,6 @@ def describe_page(page: "object", prim: PagePrimitives, regions, table_grids: di
                 continue
 
     v.diagrams = detect_diagrams(prim, claimed)
-    for d in v.diagrams:
-        try:
-            d.crop_png_b64 = _render_crop_png(page, d.bbox)
-        except Exception:
-            pass
 
     panel_colors = sorted({_hex(f.color) for f in prim.fills if f.is_panel and not f.is_stroke})
     v.appearance = PageAppearance(

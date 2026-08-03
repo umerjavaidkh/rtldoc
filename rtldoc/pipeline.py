@@ -700,15 +700,7 @@ def to_html(result: PageResult) -> str:
         out.append(f'<section class="visual-summary"><h3>Visual Summary</h3>'
                    f'<p>{_html.escape(result.visual.description)}</p>')
         for d in result.visual.diagrams:
-            if d.crop_png_b64:
-                out.append(f'<p class="diagram-label">Extracted image (rendered directly '
-                          f'from the page, correct regardless of diagram complexity):</p>'
-                          f'<img class="diagram-crop" alt="diagram crop" '
-                          f'style="max-width:100%;height:auto;border:1px solid #ddd" '
-                          f'src="data:image/png;base64,{d.crop_png_b64}">')
-            out.append('<p class="diagram-label">Detected structure (best-effort; may be '
-                      'incomplete for complex diagrams):</p>')
-            out.append(visual.render_diagram_svg(d))
+            out.append(f'<div class="mermaid">{_html.escape(visual.render_diagram_mermaid(d))}</div>')
         out.append('</section>')
     out.append("</section>")
     return "\n".join(out)
@@ -726,9 +718,21 @@ _HTML_SHELL = """<!DOCTYPE html>
 {nav}
 {content}
 {nav}
+{mermaid_script}
 </body>
 </html>
 """
+
+# Loaded from a CDN, so a page's detected diagram renders as an actual
+# auto-laid-out flowchart (real diagramming library, not a from-scratch
+# reconstruction or a screenshot) -- the tradeoff is that viewing an
+# HTML page with a diagram needs internet access to fetch Mermaid.js;
+# only emitted for pages that actually have one, so pages without a
+# diagram stay fully offline-viewable.
+_MERMAID_SCRIPT = """<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true });
+</script>"""
 
 _DEFAULT_CSS = """
 body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 900px;
@@ -776,15 +780,18 @@ def save_html(results: list[PageResult], out_dir: str, css_href: str = "styles.c
         prev = f'<a href="{names[i-1]}">&larr; prev</a>' if i > 0 else "<span></span>"
         nxt = f'<a href="{names[i+1]}">next &rarr;</a>' if i < len(results) - 1 else "<span></span>"
         nav = f'<nav class="page-nav">{prev}<a href="index.html">index</a>{nxt}</nav>'
+        has_diagram = bool(r.visual and r.visual.diagrams)
         html_doc = _HTML_SHELL.format(title=f"{title_prefix} {r.page}", css_href=css_href,
-                                      nav=nav, content=to_html(r))
+                                      nav=nav, content=to_html(r),
+                                      mermaid_script=_MERMAID_SCRIPT if has_diagram else "")
         with open(os.path.join(out_dir, names[i]), "w") as f:
             f.write(html_doc)
 
     index_items = "".join(f'<li><a href="{n}">{title_prefix} {r.page}</a></li>'
                           for n, r in zip(names, results))
     index_html = _HTML_SHELL.format(title=f"{title_prefix}s", css_href=css_href,
-                                    nav="", content=f"<h1>{title_prefix}s</h1><ol>{index_items}</ol>")
+                                    nav="", content=f"<h1>{title_prefix}s</h1><ol>{index_items}</ol>",
+                                    mermaid_script="")
     with open(os.path.join(out_dir, "index.html"), "w") as f:
         f.write(index_html)
     return names
