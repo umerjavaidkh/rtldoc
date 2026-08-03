@@ -345,9 +345,16 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     result = PageResult(page=prim.number, columns=0, born_digital=prim.is_born_digital)
 
     if not prim.is_born_digital:
-        # hand off to the OCR branch; kept separate so this stays importable
-        # without torch installed.
-        result.blocks = []
+        # Scanned / no-text-layer page: fall back to Tesseract, kept as a
+        # separate module (lazy-imported here) so this file stays importable
+        # without tesseract installed. If tesseract isn't available or finds
+        # nothing, this is exactly the previous behavior -- no blocks.
+        from . import ocr as _ocr
+        result.blocks = [
+            Block(role="paragraph", text=text, bbox=bbox, order=i, column=0,
+                 activity=None, style=None)
+            for i, (text, bbox) in enumerate(_ocr.ocr_page(page))
+        ]
         return result
 
     # Column and reading-order direction is a property of this page's own

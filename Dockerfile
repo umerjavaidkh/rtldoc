@@ -4,7 +4,14 @@
 # pipeline at all today, see pyproject.toml for why. Anything importing
 # cv2 (the not-yet-wired scanned-page fallback) needs `--extra-index cv`
 # added to the pip install line below.
+#
+# tesseract-ocr IS installed here: ocr.py's scanned-page fallback shells out
+# to the `tesseract` binary directly (no pip package), so it needs to be on
+# PATH for scanned pages to OCR inside the container.
 FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

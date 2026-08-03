@@ -18,6 +18,11 @@ dependencies = [
 # cvfallback.py (pixel-based fallback for scanned/flattened pages) isn't
 # wired into the pipeline yet -- nothing in rtldoc/ imports cv2 today.
 cv = ["opencv-python-headless"]
+# ocr.py's scanned-page fallback shells out to the `tesseract` CLI binary
+# directly (apt/brew install tesseract-ocr) rather than the pytesseract
+# Python wrapper -- no pip package needed, so there's no extras group for
+# it. Optional at runtime: if the binary isn't on PATH, a scanned page just
+# gets no blocks, same as before this feature existed.
 # Only tests/make_fixture.py (the synthetic-PDF generator for local testing)
 # needs these; the parser itself never shapes or reverses text on its own.
 dev = ["arabic-reshaper", "python-bidi"]

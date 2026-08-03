@@ -87,8 +87,11 @@ plus structured JSON, or a self-contained HTML page per PDF page.
 - Borderless-table *grid geometry* is approximate on the hardest wide,
   multi-level-header tables (occasional row/column structure mismatches
   — that's the 0.942 TEDS on our graded case, not 1.0).
-- Scanned / no-text-layer pages are flagged for OCR, not yet parsed inline
-  (see Roadmap).
+- Scanned / no-text-layer pages now OCR via Tesseract (needs the `tesseract`
+  binary on PATH — `brew install tesseract` / `apt install tesseract-ocr`;
+  no Python package required). Word-level positioning, not this repo's
+  glyph-exact reading order; a page with no tesseract installed just gets
+  no blocks, as before.
 - Best semantic typing needs a one-time per-publisher style map (~20 min).
 - Diagram detection reconstructs simple box-and-arrow flowcharts reliably;
   dense multi-level diagrams (deep tree/org-chart hierarchies with many
@@ -97,9 +100,6 @@ plus structured JSON, or a self-contained HTML page per PDF page.
 
 ## Roadmap
 
-- **OCR for scanned pages.** Pages with no text layer are currently flagged,
-  not parsed. Next phase: route them through Tesseract for inline text
-  extraction instead of a manual-review flag.
 - Reliable connection tracing for dense/branching diagrams (see above).
 
 ---
