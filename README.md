@@ -30,10 +30,11 @@ and vector tables.
 
 ## Proven at scale
 
-Tested on **108 PDFs / 11,961 pages** it never saw during development — an
-Arabic teacher's guide, two SEC 10-Ks, 96 arXiv papers (15 fields), 5 OpenStax
-physics/chemistry/calculus textbooks (figures, geometry, exercises), and the
-3,130-page PostgreSQL 18 manual (deeply-nested reference tables, code blocks).
+Tested on **119 PDFs / 13,557 pages** it never saw during development — an
+Arabic teacher's guide, two SEC 10-Ks, 96+ arXiv papers (15 fields), 5 OpenStax
+physics/chemistry/calculus textbooks (figures, geometry, exercises), the
+3,130-page PostgreSQL 18 manual (deeply-nested reference tables, code blocks),
+and a growing set of real-world forms, reports, and scanned documents.
 The checks are *property-based and label-free*, so they scale to any corpus:
 
 | Property (must hold on every page) | Result |
@@ -87,6 +88,14 @@ plus structured JSON, or a self-contained HTML page per PDF page.
 - Borderless-table *grid geometry* is approximate on the hardest wide,
   multi-level-header tables (occasional row/column structure mismatches
   — that's the 0.942 TEDS on our graded case, not 1.0).
+- A page dominated by a figure/table spanning the full content width can
+  still be under-counted as fewer columns than it visually has — the
+  whitespace-gutter detector requires the gap to stay empty across most
+  of the page's height, and a full-width element defeats that locally.
+- A table cell whose own text wraps onto a later line, where that line's
+  content coincidentally re-aligns with an earlier row's columns, can
+  occasionally attach to the wrong row (`_merge_wrapped_label_rows` — a
+  narrow, tracked edge case, not a general table-detection failure).
 - Scanned / no-text-layer pages now OCR via Tesseract (needs the `tesseract`
   binary on PATH — `brew install tesseract` / `apt install tesseract-ocr`;
   no Python package required). Word-level positioning, not this repo's
@@ -101,6 +110,13 @@ plus structured JSON, or a self-contained HTML page per PDF page.
 ## Roadmap
 
 - Reliable connection tracing for dense/branching diagrams (see above).
+- A page-level chart/figure classification pass, so bar charts, legends,
+  and gridlines are recognized and set aside before table/diagram
+  detection runs, rather than relying on those detectors' own guards to
+  reject them case by case.
+- A cell-level golden regression corpus (`eval/golden/` + `eval/regression.py`)
+  now exists and grows with each table-detection fix; still short of full
+  coverage across document types.
 
 ---
 
