@@ -365,7 +365,16 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
 
     regions = propose_regions(prim)
     regions = assign_spans(prim, regions)
-    regions = order_regions(regions, prim.width, prim.height, rtl=is_rtl_page, spans=prim.spans)
+    # Column-boundary detection (inside order_regions) needs the page's
+    # flowing prose, not a table's own cell text -- a table commonly
+    # breaks out to the full content width regardless of the surrounding
+    # column layout, and its cell spans collectively fill in the gutter
+    # region the same way a wide single span would, hiding a real 2-column
+    # split in the prose around it (see assign_spans for the confirmed
+    # case this fixes).
+    table_bboxes = [r.bbox for r in regions if r.kind == "table"]
+    flow_spans = [s for s in prim.spans if not any(containment(s.bbox, tb) > 0.5 for tb in table_bboxes)]
+    regions = order_regions(regions, prim.width, prim.height, rtl=is_rtl_page, spans=flow_spans)
     result.columns = len({r.column for r in regions})
     _link_activities(regions)
 

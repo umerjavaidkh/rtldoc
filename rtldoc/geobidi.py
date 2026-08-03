@@ -113,7 +113,7 @@ def glyphs_from_page(page: "fitz.Page", clip: tuple | None = None,
 
 
 def group_baselines(glyphs: list[Glyph], tol_frac: float = 0.45,
-                    col_gap_mult: float = 1.5) -> list[list[Glyph]]:
+                    col_gap_mult: float = 1.3) -> list[list[Glyph]]:
     """Group glyphs into baselines by y-proximity, then split any baseline
     that contains an abnormally wide horizontal gap.
 
@@ -135,6 +135,17 @@ def group_baselines(glyphs: list[Glyph], tol_frac: float = 0.45,
     digits character-by-character ("2017" + "40,653" -> "24001,7653") once
     sorted by x. Same class of bug as layout.group_by_line's fix; this is
     the sibling implementation that hadn't gotten it yet.
+
+    col_gap_mult=1.3, not the original 1.5: a real 2-column WHO report's
+    actual gutter measured 14.9947pt on 10pt body text -- 0.0053pt under
+    the old 15.0pt cutoff (1.5x), so the split silently failed by a
+    rounding hair on this page's first couple of lines (later lines'
+    slightly wider gaps happened to clear it, which is why only some
+    lines merged). A normal inter-word gap is ~0.2x font size (see
+    line_to_text's own space_frac) -- 1.3x still leaves a 6x+ margin
+    above real word-spacing, comfortable room to lower it without risking
+    an ordinary wide gap (after punctuation, justified text) being
+    mistaken for a column gutter.
     """
     if not glyphs:
         return []

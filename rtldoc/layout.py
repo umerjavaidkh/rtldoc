@@ -1553,12 +1553,24 @@ def _merge_marker_columns(by_col: dict[int, list[Span]], min_rows: int = 3, shor
         # meaningfully narrower, not just "happens to have fewer or
         # shorter lines," is what a normal 2-column paper's near-equal
         # widths never satisfy.
+        # Width is measured as the MEDIAN individual line width within
+        # each column, not the column's overall bounding-box span (max x1
+        # - min x0) -- the latter is fragile to a single outlier line
+        # (confirmed real case: a table's own wide caption, already
+        # excluded from gutter detection by a similar percentile filter in
+        # _column_boundaries, still sat in this column's raw span list
+        # here and alone inflated its bounding-box width enough to make
+        # two ordinary, equal-width prose columns look asymmetric -- 0.68
+        # ratio, under the 0.7 bar -- and get wrongly merged anyway). The
+        # median is what most of a column's OWN lines actually look like,
+        # immune to one outlier caption/heading line the same way it's
+        # immune in _column_boundaries.
         smaller, larger, src, dst = ((a_lines, b_lines, a, b) if len(a_lines) <= len(b_lines)
                                      else (b_lines, a_lines, b, a))
-        smaller_w = max((s.bbox[2] for ln in smaller for s in ln), default=0) - \
-                    min((s.bbox[0] for ln in smaller for s in ln), default=0)
-        larger_w = max((s.bbox[2] for ln in larger for s in ln), default=0) - \
-                   min((s.bbox[0] for ln in larger for s in ln), default=0)
+        smaller_w = float(np.median([max(s.bbox[2] for s in ln) - min(s.bbox[0] for s in ln)
+                                     for ln in smaller])) if smaller else 0.0
+        larger_w = float(np.median([max(s.bbox[2] for s in ln) - min(s.bbox[0] for s in ln)
+                                    for ln in larger])) if larger else 0.0
         if (larger_w > 0 and smaller_w / larger_w < 0.7
                 and _row_match_frac(smaller, larger) >= 0.7):
             by_col[dst] = by_col[dst] + by_col[src]
@@ -1628,7 +1640,20 @@ def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.
     # column merge with a line from the other whenever their x-ranges
     # happened to overlap -- exactly what scrambled the two-column teacher /
     # pupil pages, since paragraph clustering ran before columns existed.
-    boundaries = _column_boundaries([s.bbox for s in prim.spans], prim.width, prim.height)
+    #
+    # Boundaries are computed from `orphans` (the flowing prose text still
+    # needing a column) rather than every span on the page -- a table
+    # commonly breaks out to the FULL content width regardless of the
+    # surrounding page's column layout, and its many individual (narrow)
+    # cell spans collectively fill in the gutter region row after row, the
+    # same way a wide single span would (confirmed real case: a WHO report
+    # page with genuine 2-column running text above a full-width table
+    # found NO gutter at all when table-cell spans were included, and the
+    # whole page's prose got wrongly read as one column; excluding them
+    # recovers the gutter the surrounding paragraphs actually have). A
+    # table's own internal cell layout has nothing to say about whether
+    # the PROSE around it is 1- or 2-column.
+    boundaries = _column_boundaries([s.bbox for s in orphans], prim.width, prim.height)
     by_col: dict[int, list[Span]] = {}
     for s in orphans:
         col = _column_of((s.bbox[0] + s.bbox[2]) / 2, boundaries)
@@ -1793,6 +1818,52 @@ def _column_boundaries(bboxes: list[Rect], page_width: float, page_height: float
     content_width = max(content_right - content_left, 1.0)
     narrow = [b for b in bboxes if (b[2] - b[0]) <= content_width * max_width_frac]
     use = narrow if narrow else bboxes
+
+    # A caption/subtitle that breaks out to span WIDER than either column
+    # but narrower than max_width_frac's absolute cutoff still fills in a
+    # real gutter at its own y-range, the same way a full-width element
+    # does (confirmed real case: a table's own two-line caption, "TABLE 1
+    # / Global targets set in 2023...", spanning 71% of a 2-column page's
+    # content width -- under 92%, so the absolute cutoff above didn't
+    # exclude it, and its single wide bbox was enough to drop the gutter's
+    # fill_frac just over `empty_thresh`, hiding a real 2-column split in
+    # the genuine body text around it). A fixed width-fraction can't catch
+    # this without also excluding genuine full-width lines on an actual
+    # 1-column page (confirmed case above: ~90%-wide body lines on a
+    # business filing) -- the two scenarios need a page-relative measure,
+    # not a shared constant. What distinguishes them: on the 2-column
+    # page, the caption is a rare outlier against a tight, dominant
+    # cluster of column-width lines (the page's own 90th-percentile width);
+    # on the 1-column filing, wide lines ARE that dominant cluster, so
+    # nothing exceeds it by a meaningful margin. Comparing each bbox
+    # against the page's own 90th-percentile width (not a global content-
+    # width fraction) is what makes this hold across both.
+    if len(use) >= 5:
+        p90 = float(np.percentile([b[2] - b[0] for b in use], 90))
+        typical = [b for b in use if (b[2] - b[0]) <= p90 * 1.25]
+        if typical:
+            use = typical
+
+    # A page title/heading sitting above the 2-column body can survive the
+    # width filter above (its own second wrapped line can happen to be a
+    # perfectly ordinary column-line width, just centered or indented
+    # differently) while still crossing the gutter at its own y-range --
+    # confirmed real case: "strategy and targets", the wrapped second line
+    # of a 26pt heading, measured 232pt wide (well under the column-width
+    # outlier bar above, since it's genuinely similar in WIDTH to a real
+    # body line) but sat centered across the gutter anyway. A heading's
+    # bbox HEIGHT (driven by its much larger font size -- 26pt vs 10pt
+    # body text here) is the more reliable outlier signal in exactly this
+    # case, using the same page-relative percentile idea as the width
+    # filter: a real body line's height clusters tightly around the page's
+    # own dominant line-height, and a heading stands out from that
+    # cluster the same way its width-outlier caption sibling stood out
+    # from the width cluster above.
+    if len(use) >= 5:
+        p90h = float(np.percentile([b[3] - b[1] for b in use], 90))
+        typical_h = [b for b in use if (b[3] - b[1]) <= p90h * 1.25]
+        if typical_h:
+            use = typical_h
     if not use:
         return [0.0, page_width]
 
