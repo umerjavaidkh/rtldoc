@@ -205,6 +205,21 @@ def detect_diagrams(prim: PagePrimitives, claimed: list[Rect], min_shapes: int =
                    and not any(containment(f.bbox, c) > 0.5 for c in claimed)]
     if len(stroke_fills) < min_shapes:
         return []
+    # The clustering below is O(n^2), and the connection-inference further
+    # down is O(members^2 x points^2) within a cluster -- fine for a real
+    # flowchart's handful of boxes/connectors, but a genuinely complex
+    # vector graphic (a detailed map, chart, or technical illustration) can
+    # carry 1000+ small stroked/filled paths on one page and take over a
+    # minute to churn through, for a result that was never going to be a
+    # real diagram anyway (confirmed real case: a WHO report page with
+    # 1425 candidate shapes -- almost certainly a data map -- took 62s;
+    # every genuine flowchart found so far, including a 17-box one, stayed
+    # well under 200). Bailing out early here is the same "prefer under-
+    # structuring" choice as the unlabeled-box guard below: a page this
+    # dense was never going to render as a labeled node-and-edge diagram,
+    # so there's nothing lost by skipping it, and a lot of time saved.
+    if len(stroke_fills) > 200:
+        return []
 
     # cluster nearby stroked shapes (same union-find pattern as
     # layout._cluster_rules / _cluster_images)
