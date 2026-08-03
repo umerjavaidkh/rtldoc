@@ -48,6 +48,23 @@ def _is_numeric_cell(t: str) -> bool:
         return False
     return any(ch.isdigit() for ch in t) or t in "$€£¥%—–-"
 
+
+def _evidence_score(signals: dict[str, float], weights: dict[str, float]) -> float:
+    """Combine named table-ness signals (each caller-normalized to [0,1])
+    into one confidence via a fixed weighted sum, so a table candidate is
+    accepted when its evidence clears a threshold rather than surviving a
+    chain of independently AND'd vetoes. A veto chain means guard #10,
+    tuned for the document that motivated it, can silently kill a true
+    positive shaped like guard #3's case -- a strongly-framed non-numeric
+    table (real rules, no digits) should survive on framing+fill alone, and
+    a coincidental alignment that's merely mediocre on every axis should
+    fail without needing its own bespoke rejection rule. Weights are tuned
+    against rtldoc/eval/golden's fixtures, each of which used to be a
+    `# confirmed real case:` comment guarding one specific veto -- see
+    _detect_borderless_in_lines and _detect_row_wrapped_in_frame for the
+    signals actually fed in."""
+    return sum(weights[k] * signals[k] for k in weights)
+
 RegionKind = Literal["panel", "chip", "figure", "flow", "rule", "table"]
 
 
@@ -570,20 +587,28 @@ def _detect_row_wrapped_in_frame(lines: list[list[Span]], min_rows: int, tol: fl
         # line plus three bulleted sub-items had exactly 2 distinct key texts
         # ("FIGURE 9.15" and the bullet glyph) across 4 rows, which cleared a
         # bare ">1 distinct" bar while still being 75% the same repeated glyph.
+        # key_diversity_ratio feeds the combined evidence score below
+        # (alongside wrap presence) rather than vetoing here on its own --
+        # a real KEY column names a DIFFERENT parameter/entry each row, so
+        # low diversity is real negative evidence, but not on its own
+        # decisive: see the score check further down for the case (a
+        # filter's Table 3.9 opening with a single repeated-looking KEY)
+        # this used to reject outright.
         key_texts_list = [min(lines[li], key=lambda s: s.bbox[0]).text.strip() for li in row_start_lines]
-        if len(set(key_texts_list)) / len(key_texts_list) <= 0.5:
-            return None
+        key_diversity_ratio = len(set(key_texts_list)) / len(key_texts_list)
 
-        # The ratio test above can still be diluted below its own threshold by
-        # unrelated ORDINARY PROSE lines that happen to share the recurring
-        # margin too (any two different prose lines are, trivially, distinct
-        # text) -- confirmed real case: a figure caption's own bullet list sat
-        # at the exact same x as two ordinary paragraph lines just above it (the
-        # page's default body-text margin), and those two genuinely-different
-        # sentences were enough "distinct" values to clear the 0.5 ratio despite
-        # the bullet itself repeating 3 times. A repeated key that is a short,
-        # non-alphanumeric glyph (a bullet, dash, or similar marker) is never a
-        # real parameter/entry name no matter how the overall ratio comes out.
+        # A repeated key that is a short, non-alphanumeric glyph (a bullet,
+        # dash, or similar marker) is never a real parameter/entry name no
+        # matter how the overall diversity ratio comes out -- this is a
+        # categorical fact about what the KEY column contains, not a
+        # strength-of-evidence question, so it stays a hard reject rather
+        # than folding into the score (confirmed real case: a bulleted list
+        # of stream-object rules was read as a table whose single "KEY" was
+        # always "•"; a figure caption's own bullet list sat at the exact
+        # same x as two ordinary paragraph lines just above it, and those
+        # two genuinely-different sentences were enough "distinct" values
+        # to inflate the diversity ratio despite the bullet itself
+        # repeating 3 times).
         most_common_text, most_common_count = Counter(key_texts_list).most_common(1)[0]
         if most_common_count > 1 and len(most_common_text) <= 2 and not most_common_text.isalnum():
             return None
@@ -702,8 +727,39 @@ def _detect_row_wrapped_in_frame(lines: list[list[Span]], min_rows: int, tol: fl
         # a bare-majority bar, and was wrongly rejected outright. The table's
         # own HEADER band ("KEY TYPE VALUE") is excluded from this check --
         # it never wraps, even in a genuine table.
+        # Zero wrapping stays a HARD, categorical reject rather than a
+        # scored signal: an ordinary misread paragraph can never show even
+        # ONE wrapping band (by construction, every one of its lines
+        # independently qualifies as its own row-start), so zero wraps is
+        # perfect evidence this is paragraph text, no matter how diverse
+        # its "keys" look -- this is exactly the shape a purely-additive
+        # score can't safely capture (a plain prose paragraph's leading
+        # words are trivially all distinct, so a high key_diversity_ratio
+        # would otherwise outweigh zero wrap evidence and wrongly pass;
+        # confirmed real case: a plain prose paragraph below an unrelated
+        # small table, opened up by the no-closing-rule retry above, got
+        # read as a table with one bogus 1-line "row" per paragraph line).
         data_bands = bands[1:]
         if data_bands and not any(hi > lo for lo, hi in data_bands):
+            return None
+
+        # Beyond that hard floor, wrap_frac (how MUCH of the table wraps,
+        # not just whether any of it does) becomes a scored signal
+        # alongside key_diversity_ratio: a KEY column that's borderline on
+        # diversity but wraps heavily is real positive evidence the
+        # diversity-alone guard used to ignore entirely once it passed 0.5
+        # -- confirmed real case: a legitimate table mixing short one-line
+        # entries (a boolean flag, a short date) with a couple of
+        # genuinely long-wrapping ones had only 2 of 5 data rows wrap
+        # (40%), well under a bare-majority bar, and was previously
+        # accepted only because diversity alone already cleared 0.5; this
+        # score reaches the same accept with both signals contributing.
+        wrap_frac = (sum(1 for lo, hi in data_bands if hi > lo) / len(data_bands)) if data_bands else 1.0
+        score = _evidence_score(
+            {"key_diversity": key_diversity_ratio, "wrap_frac": wrap_frac},
+            {"key_diversity": 0.7, "wrap_frac": 0.3},
+        )
+        if score < 0.5:
             return None
 
         band_spans = [[s for li in range(lo, hi + 1) for s in lines[li]] for lo, hi in bands]
@@ -800,6 +856,23 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
     (prose) spans never vote, so a wrapped sentence can't invent a column.
     """
     lines = group_by_line(prim.spans)
+    # group_by_line groups purely by y-proximity, with NO column awareness
+    # at all -- on a multi-column page, a "line" at a given height can mix
+    # spans from two DIFFERENT columns that merely share a y by coincidence
+    # (confirmed real case: a 2-column arXiv paper's left-column running
+    # prose and a table confined to the right column produced one merged
+    # "line" pairing an unrelated sentence with that table's own row).
+    # Splitting lines at the page's known column gutters was tried and
+    # reverted: _column_boundaries requires a gutter to stay empty across
+    # nearly the full content height, which a wide table spanning BOTH
+    # columns elsewhere on the same page defeats (its own rows fill in
+    # exactly the x-range a gutter would otherwise occupy), so it found no
+    # gutter at all on the page that motivated this -- and gutter-splitting
+    # still broke 4 previously-correct single-column tables in the
+    # regression corpus, treating a real row's own wide cell-to-cell gap as
+    # a column boundary. Column/2-column-mixing remains open; the fixes
+    # below (band segmentation and per-band column re-voting) are
+    # independent of it and validated separately.
     if len(lines) < min_rows:
         return []
 
@@ -846,12 +919,31 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
     # "Growth Rate" have left edges spanning 117-152 and right edges
     # spanning 205-240, yet all 4 share the exact same center x to within
     # a point). Center is tried as a third, equally-scored candidate.
-    best_score, voter_tables = 0.0, []
+    candidates: list[tuple[Region, float]] = []
     for edge in (lambda s: s.bbox[2], lambda s: s.bbox[0], lambda s: (s.bbox[0] + s.bbox[2]) / 2):
-        score, tables = _detect_borderless_in_lines(lines, edge, min_rows, min_cols, tol, pad, rules,
-                                                     prim.height, panels)
-        if tables and score > best_score:
-            best_score, voter_tables = score, tables
+        candidates.extend(_detect_borderless_in_lines(lines, edge, min_rows, min_cols, tol, pad, rules,
+                                                       prim.height, panels))
+
+    # Different tables on the SAME page can each need a DIFFERENT edge
+    # strategy (see above) -- picking one page-wide "best" edge and
+    # discarding whatever the other two found was itself an un-scoped
+    # decision, exactly the mistake this function's edge-selection is
+    # supposed to avoid for a single table. An edge that correctly detects
+    # THREE separate tables (each a solid but unspectacular fill_frac) used
+    # to lose, in an averaged-score comparison across its own tables, to a
+    # different edge that found only ONE strong-but-wrong table -- silently
+    # discarding the other two genuine detections entirely (confirmed real
+    # case: three stacked tables on one arXiv page). Keeping every
+    # candidate from every edge and letting overlapping candidates compete
+    # directly on their own fill_frac extends the SAME "best fill-fraction
+    # wins" pattern already used for a single table's edge choice from "one
+    # edge wins the whole page" to "the best candidate wins its own
+    # region."
+    voter_tables: list[Region] = []
+    for table, _score in sorted(candidates, key=lambda ts: ts[1], reverse=True):
+        if not any(containment(table.bbox, kept.bbox) > 0.3 or containment(kept.bbox, table.bbox) > 0.3
+                   for kept in voter_tables):
+            voter_tables.append(table)
 
     best_tables = list(row_wrapped)
     for t in voter_tables:
@@ -864,7 +956,7 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
 def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, min_cols: int,
                                  tol: float, pad: float, rules: list[Rect] = (),
                                  page_bottom: float | None = None,
-                                 panels: list[Rect] = ()) -> tuple[float, list[Region]]:
+                                 panels: list[Rect] = ()) -> list[tuple[Region, float]]:
     # A genuine 2-column reference/glossary table (a symbolic code beside
     # its description, neither numeric) needs only 2 columns, but requiring
     # 3 unconditionally is what keeps pure coincidental alignment (two
@@ -906,7 +998,7 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
             if votes_for_column(s):
                 votes.append((edge(s), li))
     if len(votes) < min_rows * min_cols:
-        return 0.0, []
+        return []
     votes.sort()
 
     # 2. greedy-cluster right edges into candidate columns
@@ -924,7 +1016,7 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
     # 3. a real column is one an alignment supports across enough rows
     real = [c for c in clusters if len(c["lines"]) >= min_rows]
     if len(real) < min_cols:
-        return 0.0, []
+        return []
     real_lines = [c["lines"] for c in real]
 
     # 4. strongly-tabular rows hit >= min_cols of those columns; split them
@@ -934,28 +1026,74 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
 
     tab = [li for li in range(len(lines)) if hits(li) >= min_cols]
     if len(tab) < min_rows:
-        return 0.0, []
+        return []
 
+    # A page can hold several DIFFERENT tables whose column x-positions
+    # happen to partially coincide -- votes are pooled across the WHOLE
+    # page (step 1 above), so a stray alignment between two unrelated
+    # tables' columns can each independently clear min_cols and both land
+    # in `tab`, even though they belong to different tables entirely
+    # (confirmed real case: three stacked booktabs-style tables on one
+    # arXiv page, each with 5-11 of its OWN numeric columns, shared just
+    # enough coincidental column positions -- within a narrow paper's fixed
+    # width -- that hits() alone couldn't tell them apart). A first attempt
+    # fixed this by requiring adjacent tabular lines to share most of their
+    # hit COLUMNS, not just clear the same count -- reverted after direct
+    # testing found a real table it broke: a financial statement legitimately
+    # alternates "$ amount" rows (7 populated columns) with "% growth rate"
+    # rows (2 *different*, non-overlapping columns) for the SAME table, and
+    # column-identity overlap can't tell that apart from two genuinely
+    # different tables, since both look like ~0% column overlap between
+    # adjacent rows. The actual distinguishing signal already exists one
+    # level up: a new table always announces itself with its own numbered
+    # caption line ("Table 2. ...", "Figure 3. ..."), which the sparse-row
+    # case never has between it and its neighbor.
     def _has_section_break(prev: int, cur_li: int) -> bool:
-        """A colon-terminated PROSE SENTENCE between two tabular rows is a
-        new section's own intro (a new table's caption, not part of this
-        one) and must hard-break a band even within the small gap otherwise
-        tolerated for wrapped labels. A short colon-terminated LABEL
-        ("Revenue:", "Costs and expenses:") is not this -- it's a
-        legitimate divider row *within* the same table (confirmed against
-        gold: it appears as its own row, blank-valued, inside one
-        continuous table) and must not split anything. Word count is what
-        tells them apart: a divider label is a few words; a real section
-        intro is a full sentence (confirmed real case: "Share-based
-        compensation expense included in costs and expenses:" at 9 words,
-        introducing a wholly separate table two lines later, vs "Costs and
-        expenses:" at 3 words, a divider inside the same table)."""
-        for li in range(prev + 1, cur_li):
+        """A prose line between two tabular rows that clearly starts a NEW
+        section -- a numbered "Table N."/"Figure N." caption, or a
+        colon-terminated full sentence -- must hard-break a band even
+        within the small gap otherwise tolerated for wrapped labels. A
+        short colon-terminated LABEL ("Revenue:", "Costs and expenses:") is
+        not this -- it's a legitimate divider row *within* the same table
+        (confirmed against gold: it appears as its own row, blank-valued,
+        inside one continuous table) and must not split anything. Word
+        count is what tells them apart: a divider label is a few words; a
+        real section intro is a full sentence (confirmed real case:
+        "Share-based compensation expense included in costs and expenses:"
+        at 9 words, introducing a wholly separate table two lines later,
+        vs "Costs and expenses:" at 3 words, a divider inside the same
+        table). The numbered-caption check is a second, independent signal
+        (confirmed real case: three stacked "Table N."-captioned tables on
+        one arXiv page, sharing coincidentally-similar column positions,
+        need this to be told apart -- see above)."""
+        # Scans through cur_li INCLUSIVE, not just strictly between --
+        # group_by_line has no column awareness (see detect_borderless_
+        # tables), so on a 2-column page a numbered caption belonging to
+        # the right column can land merged onto the SAME "line" as an
+        # unrelated left-column section heading, which is also cur_li
+        # itself whenever that merged line happens to clear the min_cols
+        # vote too (confirmed real case: "4.2. Training Details Table 3.
+        # TapVid3D benchmark results..." -- the caption that should have
+        # split table 2 from table 3 was sitting ON the boundary tabular
+        # line, never checked by a range that stopped one line short of it).
+        for li in range(prev + 1, cur_li + 1):
             ln = lines[li]
             if not ln:
                 continue
             text = " ".join(s.text for s in sorted(ln, key=lambda s: s.bbox[0])).strip()
             if text.endswith(":") and len(text.split()) >= 6:
+                return True
+            # A genuine caption's number is followed immediately by a
+            # period then non-digit ("Table 2.  Performance..."); an
+            # ordinary cross-reference inside prose ("...see Table 8.109)")
+            # continues into a section-numbered decimal instead -- the
+            # trailing "\.(?!\d)" is what tells a real caption apart from a
+            # citation that merely happens to contain the same two words
+            # (confirmed real case: "(see Table 8.109)" inside a VALUE
+            # cell's own description matched a search-anywhere check with
+            # no such distinction, wrongly hard-breaking a real table in
+            # the middle of one of its own rows).
+            if re.search(r"(?:^|\s)(Table|Figure)\s+\d+\.(?!\d)", text):
                 return True
         return False
 
@@ -970,8 +1108,7 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
             run = [cur_li]
     bands.append(run)
 
-    out: list[Region] = []
-    fill_scores: list[float] = []
+    out: list[tuple[Region, float]] = []
     for band in bands:
         if len(band) < min_rows:
             continue
@@ -1031,9 +1168,54 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
                     top_framed = True
         framed = top_framed and bot_framed
 
-        # which columns actually appear in this band
-        band_range = set(range(lo, hi + 1))
-        band_cols = [c for c in real if c["lines"] & band_range]
+        # A table's actual column x-positions are best rediscovered from
+        # its own rows alone, once its region is known -- the same
+        # principle _cluster_rules already applies to ruled-table geometry
+        # (confirmed real case: three stacked tables on one arXiv page
+        # banded apart correctly, but each band's fill_frac still measured
+        # a falsely low 0.27-0.53 using globally-derived centers, because a
+        # different table's unrelated column pitch pulled them off-center).
+        # But a local fit is *always* tighter than a global one, for a real
+        # table or a coincidental one alike -- the same bias-variance
+        # tradeoff any local-vs-global model fit has (confirmed real case:
+        # the book's own back-of-book index, 2-column term/page-number
+        # entries, and a stray math formula's subscript layout both scored
+        # safely low under the global vote, using EITHER edge, but crept
+        # past every fill_frac floor tried once centers were recomputed
+        # locally). What actually and reliably distinguished every genuine
+        # local-fit table found so far from every false positive found so
+        # far is `framed`: real drawn rules independently confirm a table
+        # exists there, and no false positive had enough real rules to
+        # frame both edges of its band. So the local recompute is used ONLY
+        # when framed, where it's validated safe; an unframed band falls
+        # back to the ORIGINAL whole-page-scoped columns -- proven safe
+        # across this whole corpus's history -- rather than trying to find
+        # a fill_frac threshold that separates "framed" and "unframed" risk
+        # profiles using the SAME locally-inflated metric (tried and
+        # abandoned: no single floor worked, since local recompute inflates
+        # fill_frac for coincidental unframed content too, and by varying
+        # amounts across different kinds of coincidence).
+        if framed:
+            local_votes: list[tuple[float, int]] = []
+            for li in range(lo, hi + 1):
+                for s in lines[li]:
+                    if votes_for_column(s):
+                        local_votes.append((edge(s), li))
+            local_votes.sort()
+            local_clusters: list[dict] = []
+            lcur: dict | None = None
+            for x, li in local_votes:
+                if lcur is not None and x - lcur["last"] <= tol:
+                    lcur["xs"].append(x); lcur["lines"].add(li); lcur["last"] = x
+                else:
+                    lcur = {"xs": [x], "lines": {li}, "last": x}
+                    local_clusters.append(lcur)
+            band_cols = [c for c in local_clusters if len(c["lines"]) >= min_rows]
+            band_support = {id(c): len(c["lines"]) for c in band_cols}
+        else:
+            band_range = set(range(lo, hi + 1))
+            band_cols = [c for c in real if c["lines"] & band_range]
+            band_support = {id(c): len(c["lines"] & band_range) for c in band_cols}
         # Drop columns whose support *within this band* is weak relative to
         # the band's strongest column. A wide financial table's real data
         # columns are hit by nearly every row (confirmed case: 22-24 of 24
@@ -1046,7 +1228,6 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
         # and shifting every row's label into the wrong cell. Relative to
         # the band's OWN best column, not an absolute count, so this scales
         # correctly for a small table too.
-        band_support = {id(c): len(c["lines"] & band_range) for c in band_cols}
         max_support = max(band_support.values(), default=0)
         band_cols = [c for c in band_cols if band_support[id(c)] >= max(min_rows, max_support * 0.4)]
         if len(band_cols) < min_cols:
@@ -1063,14 +1244,23 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
         if not aligned:
             continue
         numeric_frac = sum(_is_numeric_cell(s.text) for s in aligned) / len(aligned)
-        # A real drawn rule immediately above AND below this band (computed
-        # further up, before the grid itself was built) is independent,
-        # author-drawn evidence of a genuine table -- a top border and
-        # bottom border, even with no internal row dividers -- strong
-        # enough on its own to accept a non-numeric table (confirmed real
-        # case: an escape-sequence reference table ("\n" -> "Line feed
-        # (LF)", etc.) has neither column numeric, but is framed by real
-        # top/bottom rules exactly like any other table).
+        # Guard: real drawn framing (or a strong majority-numeric grid) is
+        # what separates a real data table from Arabic MCQ options / an
+        # answer key / a two-column prose list that merely happens to line
+        # up. Two attempts to fold this into a blended score with
+        # fill_frac/column_support were tried and reverted after direct
+        # testing against the corpus: (1) blending numeric_frac+framed with
+        # fill/support let a PDF-syntax code example ("<< key1 value1 key2
+        # value2 ... keyn valuen >>") pass, since a code illustration is
+        # deliberately regular and scored fill=1.0/support=1.0 despite
+        # numeric_frac=0.2 and framed=False; (2) blending fill_frac with
+        # column_support alone (keeping this guard hard) still let the
+        # book's own back-of-book INDEX pages pass as tables -- an index's
+        # right-aligned page-number column has very high column_support
+        # (0.92-0.94, it recurs on nearly every line) but a mostly-empty
+        # grid otherwise (fill_frac 0.06-0.22), and support alone
+        # outweighed that. Both were reverted; this stays a hard,
+        # unscored gate, same as the original.
         if numeric_frac < 0.6 and not framed:
             continue
 
@@ -1090,7 +1280,12 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
         # confirmed real case: a diluted-EPS table with many two-line row
         # labels came out at 0.45 "filled" and was rejected outright, though
         # every actual data row was completely filled (0.78 once filler
-        # lines are excluded from the count).
+        # lines are excluded from the count). That case is already fixed by
+        # the denominator restriction above, with no remaining confirmed
+        # case of a real table sitting just under this floor -- so unlike
+        # the definition-table detector's wrap/diversity signals below,
+        # there's no evidence basis yet to soften this one into a score
+        # (see the guard above for what happened when it was tried anyway).
         data_lines = [ln for li, ln in zip(range(lo, hi + 1), row_lines) if hits(li) >= min_cols]
         filled = sum(
             1
@@ -1152,9 +1347,8 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
                 table.cells.append(Region(
                     bbox=(splits[ci], rbounds[ri], splits[ci + 1], rbounds[ri + 1]),
                     kind="flow", table_row=ri, table_col=ci))
-        out.append(table)
-        fill_scores.append(fill_frac)
-    return (sum(fill_scores) / len(fill_scores) if fill_scores else 0.0), out
+        out.append((table, fill_frac))
+    return out
 
 
 def propose_regions(prim: PagePrimitives, min_panel_area: float = 2000.0) -> list[Region]:

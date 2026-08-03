@@ -35,9 +35,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 def _tables_for_page(pdf_path: str, page_no: int) -> list[list[list[str]]]:
     doc = fitz.open(str(PROJECT_ROOT / pdf_path))
-    page = doc[page_no - 1]
-    result = parse_page(page)
-    return [b.table_grid for b in result.blocks if b.role == "table" and b.table_grid is not None]
+    try:
+        page = doc[page_no - 1]
+        result = parse_page(page)
+        return [b.table_grid for b in result.blocks if b.role == "table" and b.table_grid is not None]
+    finally:
+        doc.close()
 
 
 def freeze(pdf_path: str, page_no: int, name: str | None = None, note: str = "") -> None:

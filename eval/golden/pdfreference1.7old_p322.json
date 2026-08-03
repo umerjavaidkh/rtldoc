@@ -1,0 +1,6 @@
+{
+  "pdf": "book/pdfreference1.7old.pdf",
+  "page": 322,
+  "note": "Bezier surface formula with subscripted variables (S(u,v)=...) -- negative control guarding against small coincidentally-regular non-table content being accepted via the framed-gated local recompute path.",
+  "tables": []
+}

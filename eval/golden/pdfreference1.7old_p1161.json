@@ -1,0 +1,6 @@
+{
+  "pdf": "book/pdfreference1.7old.pdf",
+  "page": 1161,
+  "note": "back-of-book index page (2-column term/page-number entries) -- negative control guarding against the false-positive regression found while validating the per-band local column recompute (numeric_frac is high since page numbers ARE numeric; framed=False is what correctly excludes it).",
+  "tables": []
+}
