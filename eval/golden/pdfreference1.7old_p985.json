@@ -1,7 +1,7 @@
 {
   "pdf": "book/pdfreference1.7old.pdf",
   "page": 985,
-  "note": "",
+  "note": "KEY/TYPE/VALUE-style reference table with mixed column-wrap topology; the 'B' row's EQUIVALENT-column wrap onto its own line ('stroke rule') is a known pre-existing row-attribution bug in _merge_wrapped_label_rows (confirmed present on main too, just misattributed differently -- merged into the wrong adjacent row instead of split into a phantom row). Not introduced by the column-set-continuity/local-recompute/per-candidate-edge-selection fixes; flagged as a separate follow-up, not fixed here.",
   "tables": [
     [
       [
@@ -17,8 +17,14 @@
         "230"
       ],
       [
+        "",
+        "stroke rule",
+        "",
+        ""
+      ],
+      [
         "B",
-        "stroke rule\nfill , stroke",
+        "fill , stroke",
         "Fill and stroke path using nonzero winding number rule 4.10",
         "230"
       ],
@@ -29,8 +35,14 @@
         "230"
       ],
       [
+        "",
+        "stroke",
+        "",
+        ""
+      ],
+      [
         "B*",
-        "stroke\neofill , stroke Fill and stroke path using even-odd rule",
+        "eofill , stroke Fill and stroke path using even-odd rule",
         "4.10",
         "230"
       ],
@@ -66,8 +78,8 @@
       ],
       [
         "c",
-        "curveto Append curved segment to path (three control points)",
-        "4.9",
+        "curveto",
+        "Append curved segment to path (three control points) 4.9",
         "226"
       ],
       [
