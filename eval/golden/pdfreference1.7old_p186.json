@@ -1,0 +1,61 @@
+{
+  "pdf": "book/pdfreference1.7old.pdf",
+  "page": 186,
+  "note": "two adjacent tables sharing reprinted KEY/TYPE/VALUE header, row-group split fix",
+  "tables": [
+    [
+      [
+        "KEY",
+        "TYPE",
+        "VALUE"
+      ],
+      [
+        "Size",
+        "integer",
+        "(Optional) The size of the embedded file, in bytes."
+      ],
+      [
+        "CreationDate",
+        "date",
+        "(Optional) The date and time when the embedded file was created."
+      ],
+      [
+        "ModDate",
+        "date",
+        "(Optional) The date and time when the embedded file was last modified."
+      ],
+      [
+        "Mac",
+        "dictionary",
+        "(Optional) A subdictionary containing additional information specific to\nMac OS files (see Table 3.44)."
+      ],
+      [
+        "CheckSum",
+        "string",
+        "(Optional) A 16-byte string that is the checksum of the bytes of the uncom­\npressed embedded file. The checksum is calculated by applying the standard\nMD5 message-digest algorithm (described in Internet RFC 1321, The MD5\nMessage-Digest Algorithm ; see the Bibliography) to the bytes of the embedded\nfile stream."
+      ]
+    ],
+    [
+      [
+        "KEY",
+        "TYPE",
+        "VALUE"
+      ],
+      [
+        "Subtype",
+        "integer",
+        "(Optional) The embedded file’s file type. It is encoded as an integer according to Mac\nOS conventions: a 4-character ASCII text literal, converted to a 32-bit integer, with the\nhigh-order byte first. For example, the file type 'CARO' is represented as the hexadeci­\nmal integer 4341524F, which is expressed in decimal as 1128354383."
+      ],
+      [
+        "Creator",
+        "integer",
+        "(Optional) The embedded file’s creator signature, encoded in the same way as Subtype ."
+      ],
+      [
+        "ResFork",
+        "stream",
+        "(Optional) The binary contents of the embedded file’s resource fork."
+      ]
+    ]
+  ]
+}

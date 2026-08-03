@@ -1,0 +1,39 @@
+{
+  "pdf": "book/pdfreference1.7old.pdf",
+  "page": 97,
+  "note": "",
+  "tables": [
+    [
+      [
+        "KEY",
+        "TYPE",
+        "VALUE"
+      ],
+      [
+        "Size",
+        "integer",
+        "(Required; must not be an indirect reference) The total number of entries in the file’s\ncross-reference table, as defined by the combination of the original section and all\nupdate sections. Equivalently, this value is 1 greater than the highest object number\nused in the file.\nNote: Any object in a cross-reference section whose number is greater than this value is\nignored and considered missing."
+      ],
+      [
+        "Prev",
+        "integer",
+        "(Present only if the file has more than one cross-reference section; must not be an indi­\nrect reference) The byte offset from the beginning of the file to the beginning of the\nprevious cross-reference section."
+      ],
+      [
+        "Root",
+        "dictionary",
+        "(Required; must be an indirect reference) The catalog dictionary for the PDF docu­\nment contained in the file (see Section 3.6.1, “Document Catalog”)."
+      ],
+      [
+        "Encrypt",
+        "dictionary",
+        "(Required if document is encrypted; PDF 1.1) The document’s encryption dictionary\n(see Section 3.5, “Encryption”)."
+      ],
+      [
+        "Info",
+        "dictionary",
+        "(Optional; must be an indirect reference) The document’s information dictionary\n(see Section 10.2.1, “Document Information Dictionary”)."
+      ]
+    ]
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "pdf": "book/pdfreference1.7old.pdf",
+  "page": 79,
+  "note": "",
+  "tables": [
+    [
+      [
+        "KEY",
+        "TYPE",
+        "VALUE"
+      ],
+      [
+        "EndOfLine",
+        "boolean",
+        "A flag indicating whether end-of-line bit patterns are required to be\npresent in the encoding. The CCITTFaxDecode filter always accepts\nend-of-line bit patterns, but requires them only if EndOfLine is true .\nDefault value: false ."
+      ],
+      [
+        "EncodedByteAlign",
+        "boolean",
+        "A flag indicating whether the filter expects extra 0 bits before each\nencoded line so that the line begins on a byte boundary. If true , the\nfilter skips over encoded bits to begin decoding each line at a byte\nboundary. If false , the filter does not expect extra bits in the encod­\ned representation. Default value: false ."
+      ],
+      [
+        "Columns",
+        "integer",
+        "The width of the image in pixels. If the value is not a multiple of 8,\nthe filter adjusts the width of the unencoded image to the next mul­\ntiple of 8 so that each line starts on a byte boundary. Default value:\n1728."
+      ],
+      [
+        "Rows",
+        "integer",
+        "The height of the image in scan lines. If the value is 0 or absent, the\nimage’s height is not predetermined, and the encoded data must be\nterminated by an end-of-block bit pattern or by the end of the fil­\nter’s data. Default value: 0."
+      ],
+      [
+        "EndOfBlock",
+        "boolean",
+        "A flag indicating whether the filter expects the encoded data to be\nterminated by an end-of-block pattern, overriding the Rows param­\neter. If false , the filter stops when it has decoded the number of lines\nindicated by Rows or when its data has been exhausted, whichever\noccurs first. The end-of-block pattern is the CCITT end-of-facsim­\nile-block (EOFB) or return-to-control (RTC) appropriate for the K\nparameter. Default value: true ."
+      ],
+      [
+        "BlackIs1",
+        "boolean",
+        "A flag indicating whether 1 bits are to be interpreted as black pixels\nand 0 bits as white pixels, the reverse of the normal PDF convention\nfor image data. Default value: false ."
+      ],
+      [
+        "DamagedRowsBeforeError",
+        "integer",
+        "The number of damaged rows of data to be tolerated before an error\noccurs. This entry applies only if EndOfLine is true and K is non-\nnegative. Tolerating a damaged row means locating its end in the\nencoded data by searching for an EndOfLine pattern and then sub­\nstituting decoded data from the previous row if the previous row\nwas not damaged, or a white scan line if the previous row was also\ndamaged. Default value: 0."
+      ]
+    ]
+  ]
+}

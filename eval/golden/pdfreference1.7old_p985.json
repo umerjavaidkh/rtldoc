@@ -1,0 +1,81 @@
+{
+  "pdf": "book/pdfreference1.7old.pdf",
+  "page": 985,
+  "note": "",
+  "tables": [
+    [
+      [
+        "OPERATOR",
+        "EQUIVALENT DESCRIPTION",
+        "TABLE",
+        "PAGE"
+      ],
+      [
+        "b",
+        "closepath , fill ,",
+        "Close, fill, and stroke path using nonzero winding number 4.10",
+        "230"
+      ],
+      [
+        "B",
+        "stroke rule\nfill , stroke",
+        "Fill and stroke path using nonzero winding number rule 4.10",
+        "230"
+      ],
+      [
+        "b*",
+        "closepath , eofill , Close, fill, and stroke path using even-odd rule",
+        "4.10",
+        "230"
+      ],
+      [
+        "B*",
+        "stroke\neofill , stroke Fill and stroke path using even-odd rule",
+        "4.10",
+        "230"
+      ],
+      [
+        "BDC",
+        "(PDF 1.2)",
+        "Begin marked-content sequence with property list 10.7",
+        "851"
+      ],
+      [
+        "BI",
+        "Begin inline image object",
+        "4.42",
+        "352"
+      ],
+      [
+        "BMC",
+        "(PDF 1.2) Begin marked-content sequence",
+        "10.7",
+        "851"
+      ],
+      [
+        "BT",
+        "Begin text object",
+        "5.4",
+        "405"
+      ],
+      [
+        "BX",
+        "(PDF 1.1) Begin compatibility section",
+        "3.29",
+        "152"
+      ],
+      [
+        "c",
+        "curveto Append curved segment to path (three control points)",
+        "4.9",
+        "226"
+      ],
+      [
+        "cm",
+        "concat Concatenate matrix to current transformation matrix",
+        "4.7",
+        "219"
+      ]
+    ]
+  ]
+}

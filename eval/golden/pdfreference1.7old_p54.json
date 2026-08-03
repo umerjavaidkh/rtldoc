@@ -1,0 +1,49 @@
+{
+  "pdf": "book/pdfreference1.7old.pdf",
+  "page": 54,
+  "note": "",
+  "tables": [
+    [
+      [
+        "SEQUENCE",
+        "MEANING"
+      ],
+      [
+        "\\n",
+        "Line feed (LF)"
+      ],
+      [
+        "\\r",
+        "Carriage return (CR)"
+      ],
+      [
+        "\\t",
+        "Horizontal tab (HT)"
+      ],
+      [
+        "\\b",
+        "Backspace (BS)"
+      ],
+      [
+        "\\f",
+        "Form feed (FF)"
+      ],
+      [
+        "\\(",
+        "Left parenthesis"
+      ],
+      [
+        "\\)",
+        "Right parenthesis"
+      ],
+      [
+        "\\\\",
+        "Backslash"
+      ],
+      [
+        "\\ ddd",
+        "Character code ddd (octal)"
+      ]
+    ]
+  ]
+}

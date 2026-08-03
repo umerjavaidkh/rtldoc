@@ -1,0 +1,205 @@
+{
+  "pdf": "book/pdfreference1.7old.pdf",
+  "page": 1001,
+  "note": "",
+  "tables": [
+    [
+      [
+        "CHAR-",
+        "DEC",
+        "HEX",
+        "OCTAL UNICODE UNICODE CHARACTER NAME OR (ALTERNATIVE",
+        "NOTES"
+      ],
+      [
+        "ACTER",
+        "",
+        "",
+        "ALIAS)",
+        ""
+      ],
+      [
+        "^@",
+        "0",
+        "0x00",
+        "0000 U+0000 (NULL)",
+        "U"
+      ],
+      [
+        "^A",
+        "1",
+        "0x01",
+        "0001 U+0001 (START OF HEADING)",
+        "U"
+      ],
+      [
+        "^B",
+        "2",
+        "0x02",
+        "0002 U+0002 (START OF TEXT)",
+        "U"
+      ],
+      [
+        "^C",
+        "3",
+        "0x03",
+        "0003 U+0003 (END OF TEXT)",
+        "U"
+      ],
+      [
+        "^D",
+        "4",
+        "0x04",
+        "0004 U+0004 (END OF TEXT)",
+        "U"
+      ],
+      [
+        "^E",
+        "5",
+        "0x05",
+        "0005 U+0005 (END OF TRANSMISSION)",
+        "U"
+      ],
+      [
+        "^F",
+        "6",
+        "0x06",
+        "0006 U+0006 (ACKNOWLEDGE)",
+        "U"
+      ],
+      [
+        "^G",
+        "7",
+        "0x07",
+        "0007 U+0007 (BELL)",
+        "U"
+      ],
+      [
+        "^H",
+        "8",
+        "0x08",
+        "0010 U+0008 (BACKSPACE)",
+        "U"
+      ],
+      [
+        "^I",
+        "9",
+        "0x09",
+        "0011 U+0009 (CHARACTER TABULATION)",
+        "SR"
+      ],
+      [
+        "^J",
+        "10",
+        "0x0a",
+        "0012 U+000A (LINE FEED)",
+        "SR"
+      ],
+      [
+        "^K",
+        "11",
+        "0x0b",
+        "0013 U+000B (LINE TABULATION)",
+        "U"
+      ],
+      [
+        "^L",
+        "12",
+        "0x0c",
+        "0014 U+000C (FORM FEED)",
+        "U"
+      ],
+      [
+        "^M",
+        "13",
+        "0x0d",
+        "0015 U+000D (CARRIAGE RETURN)",
+        "SR"
+      ],
+      [
+        "^N",
+        "14",
+        "0x0e",
+        "0016 U+000E (SHIFT OUT)",
+        "U"
+      ],
+      [
+        "^O",
+        "15",
+        "0x0f",
+        "0017 U+000F (SHIFT IN)",
+        "U"
+      ],
+      [
+        "^P",
+        "16",
+        "0x10",
+        "0020 U+0010 (DATA LINK ESCAPE)",
+        "U"
+      ],
+      [
+        "^Q",
+        "17",
+        "0x11",
+        "0021 U+0011 (DEVICE CONTROL ONE)",
+        "U"
+      ],
+      [
+        "^R",
+        "18",
+        "0x12",
+        "0022 U+0012 (DEVICE CONTROL TWO)",
+        "U"
+      ],
+      [
+        "^S",
+        "19",
+        "0x13",
+        "0023 U+0013 (DEVICE CONTROL THREE)",
+        "U"
+      ],
+      [
+        "^T",
+        "20",
+        "0x14",
+        "0024 U+0014 (DEVICE CONTROL FOUR)",
+        "U"
+      ],
+      [
+        "^U",
+        "21",
+        "0x15",
+        "0025 U+0015 (NEGATIVE ACKNOWLEDGE)",
+        "U"
+      ],
+      [
+        "^V",
+        "22",
+        "0x16",
+        "0026 U+0017 (SYNCRONOUS IDLE)",
+        "U"
+      ],
+      [
+        "^W",
+        "23",
+        "0x17",
+        "0027 U+0017 (END OF TRANSMISSION BLOCK)",
+        "U"
+      ],
+      [
+        "u",
+        "24",
+        "0x18",
+        "0030 U+02D8 BREVE",
+        ""
+      ],
+      [
+        "v",
+        "25",
+        "0x19",
+        "0031 U+02C7 CARON",
+        ""
+      ]
+    ]
+  ]
+}

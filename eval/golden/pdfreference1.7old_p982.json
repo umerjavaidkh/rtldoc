@@ -1,0 +1,57 @@
+{
+  "pdf": "book/pdfreference1.7old.pdf",
+  "page": 982,
+  "note": "",
+  "tables": [
+    [
+      [
+        "KEY",
+        "TYPE",
+        "OPI COMMENT",
+        "VALUE"
+      ],
+      [
+        "Color",
+        "array",
+        "%ALDImageColor",
+        "(Optional) An array of four numbers and a byte\nstring of the form\n[  C M Y K colorName  ]\nspecifying the value and name of the color in\nwhich the image is to be rendered. The values of\nC , M , Y , and K must all be in the range 0.0 to 1.0.\nDefault value: [ 0.0  0.0  0.0  1.0  ( Black ) ]."
+      ],
+      [
+        "Tint",
+        "number",
+        "%ALDImageTint",
+        "(Optional) A number in the range 0.0 to 1.0\nspecifying the concentration of the color speci­\nfied by Color in which the image is to be ren­\ndered. Default value: 1.0."
+      ],
+      [
+        "Overprint",
+        "boolean",
+        "%ALDImageOverprint",
+        "(Optional) A flag specifying whether the image\nis to overprint ( true ) or knock out ( false ) under­\nlying marks on other separations. Default value:\nfalse ."
+      ],
+      [
+        "ImageType",
+        "array",
+        "%ALDImageType",
+        "(Optional) An array of two integers of the form\n[  samples bits  ]\nspecifying the number of samples per pixel and\nbits per sample in the image."
+      ],
+      [
+        "GrayMap",
+        "array",
+        "%ALDImageGrayMap",
+        "(Optional) An array of 2 n integers in the range 0\nto 65,535 (where n is the number of bits per\nsample) recording changes made to the bright­\nness or contrast of the image."
+      ],
+      [
+        "Transparency",
+        "boolean",
+        "%ALDImageTransparency",
+        "(Optional) A flag specifying whether white pix­\nels in the image are to be treated as transparent.\nDefault value: true ."
+      ],
+      [
+        "Tags",
+        "array",
+        "%ALDImageAsciiTag<  NNN",
+        "> (Optional) An array of pairs of the form\n[  tagNum 1 tagText 1   …  tagNum n tagText n  ]\nwhere each tagNum is an integer representing a\nTIFF tag number and each tagText is an ASCII\nstring representing the corresponding ASCII tag\nvalue."
+      ]
+    ]
+  ]
+}

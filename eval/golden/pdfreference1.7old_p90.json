@@ -1,0 +1,24 @@
+{
+  "pdf": "book/pdfreference1.7old.pdf",
+  "page": 90,
+  "note": "",
+  "tables": [
+    [
+      [
+        "KEY",
+        "TYPE",
+        "VALUE"
+      ],
+      [
+        "Type",
+        "name",
+        "(Optional) If present, must be CryptFilterDecodeParms for a Crypt filter de­\ncode parameter dictionary."
+      ],
+      [
+        "Name",
+        "name",
+        "(Optional) The name of the crypt filter that is to be used to decrypt this\nstream. The name must correspond to an entry in the CF entry of the encryp­\ntion dictionary (see Table 3.18) or one of the standard crypt filters (see\nTable 3.23).\nDefault value: Identity ."
+      ]
+    ]
+  ]
+}

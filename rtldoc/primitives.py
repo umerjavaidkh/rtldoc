@@ -357,7 +357,7 @@ def _center(bbox: Rect) -> tuple[float, float]:
     return ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
 
 
-def dedupe_duplicate_blocks(raw: dict, iou_thresh: float = 0.2, sim_thresh: float = 0.6,
+def dedupe_duplicate_blocks(raw: dict, iou_thresh: float = 0.5, sim_thresh: float = 0.92,
                              shift_tol: float = 10.0) -> dict:
     """Drop text blocks that duplicate another block's content.
 
@@ -400,6 +400,22 @@ def dedupe_duplicate_blocks(raw: dict, iou_thresh: float = 0.2, sim_thresh: floa
     both primitives.extract_page (spans) and geobidi.page_lines (glyphs),
     so neither consumer can see the duplicate and neither needs its own
     copy of this logic.
+
+    Both thresholds were originally far looser (iou>=0.2, sim>=0.6) and
+    silently deleted ~half the body text on ordinary paragraph pages: two
+    consecutive lines of unrelated prose routinely clear 0.2 IoU (ascender/
+    descender bbox overlap between tight line-spacing is normal typesetting,
+    not duplication), and _char_bag_similarity is a letter-frequency measure
+    -- any two lines of the same-language text share 50-77% of their letter
+    bag purely from common-letter statistics, independent of actual words
+    (confirmed on book/sample-500kb.pdf p2 and 8 pages of book/BilArabi_TG07.pdf,
+    where unrelated sentence pairs scored iou 0.15-0.26/sim 0.51-0.74). Genuine
+    duplicate content -- verified on BilArabi_TG07.pdf p53's actual repeated
+    glyphs -- scores iou>=0.999/sim==1.0, since it's the same content stream
+    bytes painted twice. The large gap between those two clusters is why the
+    thresholds now sit at 0.5/0.92 rather than somewhere in between: false
+    positives top out well below 0.3 IoU and 0.8 similarity in every case
+    found so far, so there's wide margin without risking the true-positive case.
     """
     all_blocks = raw.get("blocks", [])
     blocks = [b for b in all_blocks if b.get("type") == 0]

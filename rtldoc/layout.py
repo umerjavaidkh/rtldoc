@@ -819,6 +819,7 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
     #    alignment scatters values into columns that don't line up as
     #    densely.
     rules = [f.bbox for f in prim.fills if f.is_rule]
+    panels = [f.bbox for f in prim.fills if f.is_panel]
 
     # Definition-list-style tables (a wide trailing cell wraps across many
     # lines) are tried FIRST and take priority over the generic alignment
@@ -836,10 +837,19 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
     rule_fills = [f for f in prim.fills if f.is_rule]
     row_wrapped = _detect_row_wrapped_tables(lines, min_rows, tol, pad, rule_fills)
 
+    # Right-edge and left-edge cover numeric/right-aligned and short-text/
+    # left-aligned tables respectively -- but a simple 2-column summary
+    # table (a colored header row, single key/value pairs) is routinely
+    # CENTER-aligned instead, especially in generated/marketing-style
+    # documents, and neither of the other two edges ever lines up for it
+    # (confirmed real case: "Metric"/"Market Size"/"User Satisfaction"/
+    # "Growth Rate" have left edges spanning 117-152 and right edges
+    # spanning 205-240, yet all 4 share the exact same center x to within
+    # a point). Center is tried as a third, equally-scored candidate.
     best_score, voter_tables = 0.0, []
-    for edge in (lambda s: s.bbox[2], lambda s: s.bbox[0]):
+    for edge in (lambda s: s.bbox[2], lambda s: s.bbox[0], lambda s: (s.bbox[0] + s.bbox[2]) / 2):
         score, tables = _detect_borderless_in_lines(lines, edge, min_rows, min_cols, tol, pad, rules,
-                                                     prim.height)
+                                                     prim.height, panels)
         if tables and score > best_score:
             best_score, voter_tables = score, tables
 
@@ -853,7 +863,8 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
 
 def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, min_cols: int,
                                  tol: float, pad: float, rules: list[Rect] = (),
-                                 page_bottom: float | None = None) -> tuple[float, list[Region]]:
+                                 page_bottom: float | None = None,
+                                 panels: list[Rect] = ()) -> tuple[float, list[Region]]:
     # A genuine 2-column reference/glossary table (a symbolic code beside
     # its description, neither numeric) needs only 2 columns, but requiring
     # 3 unconditionally is what keeps pure coincidental alignment (two
@@ -981,8 +992,20 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
         # intro, was already detected correctly.
         top_y = min(s.bbox[1] for s in band_spans)
         bot_y = max(s.bbox[3] for s in band_spans)
-        top_framed = any(abs(r[1] - top_y) <= tol * 5 or abs(r[3] - top_y) <= tol * 5 for r in rules)
-        bot_framed = any(abs(r[1] - bot_y) <= tol * 5 or abs(r[3] - bot_y) <= tol * 5 for r in rules)
+        # A colored PANEL enclosing this band (a header-row background, or
+        # the table's own outer frame) is the same kind of independent,
+        # author-drawn evidence as a rule -- some documents (generated
+        # reports, marketing decks) draw table structure with filled
+        # rectangles instead of stroked lines entirely, with no rule
+        # anywhere near the table at all (confirmed real case: a simple
+        # 2-column key/value table -- colored header background, bordered
+        # outer panel -- had zero rule fills anywhere near it and was
+        # rejected outright despite being unambiguously a real table).
+        panel_frames = [(p[1], p[3]) for p in panels if p[1] <= top_y + tol * 2 and p[3] >= bot_y - tol * 2]
+        top_framed = (any(abs(r[1] - top_y) <= tol * 5 or abs(r[3] - top_y) <= tol * 5 for r in rules)
+                     or any(abs(py0 - top_y) <= tol * 5 for py0, py1 in panel_frames))
+        bot_framed = (any(abs(r[1] - bot_y) <= tol * 5 or abs(r[3] - bot_y) <= tol * 5 for r in rules)
+                     or any(abs(py1 - bot_y) <= tol * 5 for py0, py1 in panel_frames))
         if not bot_framed and page_bottom is not None:
             # Generous on purpose: a page's own bottom margin/footer area
             # (page number, running header) routinely eats 80-90pt, far

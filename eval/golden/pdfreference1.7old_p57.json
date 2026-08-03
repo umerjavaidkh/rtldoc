@@ -1,0 +1,33 @@
+{
+  "pdf": "book/pdfreference1.7old.pdf",
+  "page": 57,
+  "note": "",
+  "tables": [
+    [
+      [
+        "LITERAL NAME",
+        "RESULT"
+      ],
+      [
+        "/Adobe#20Green",
+        "Adobe Green"
+      ],
+      [
+        "/PANTONE#205757#20CV",
+        "PANTONE 5757 CV"
+      ],
+      [
+        "/paired#28#29parentheses",
+        "paired( )parentheses"
+      ],
+      [
+        "/The_Key_of_F#23_Minor",
+        "The_Key_of_F#_Minor"
+      ],
+      [
+        "/A#42",
+        "AB"
+      ]
+    ]
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "pdf": "book/sample-500kb.pdf",
+  "page": 1,
+  "note": "plain paragraph lorem-ipsum, expect 0 tables -- guards against dedupe_duplicate_blocks false-positive regression",
+  "tables": []
+}

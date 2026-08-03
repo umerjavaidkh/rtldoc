@@ -1,0 +1,6 @@
+{
+  "pdf": "book/sample-500kb.pdf",
+  "page": 2,
+  "note": "plain paragraph, tight line-spacing, expect 0 tables -- the page that surfaced the dedupe false-positive bug",
+  "tables": []
+}

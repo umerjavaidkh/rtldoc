@@ -369,6 +369,21 @@ def detect_diagrams(prim: PagePrimitives, claimed: list[Rect], min_shapes: int =
         # ordinary passage blocks regardless of what this detector decides.
         if not lines:
             continue
+        # A genuine flowchart node is drawn to be read, and virtually
+        # always carries a real text label -- an "unlabeled box" is much
+        # more likely a decorative UI element inside a stock illustration
+        # (a browser-window mockup, a bar-chart icon) whose line-art
+        # strokes happen to pass the box/line shape tests too, without
+        # being a real diagram at all (confirmed real case: a marketing
+        # slide's decorative infographic illustration produced 5
+        # "unlabeled box" shapes, all pairwise "connected" to every other
+        # one -- a pattern no genuine flowchart produces -- since its
+        # decorative strokes touched multiple UI-mockup rectangles at
+        # once). If NONE of this cluster's boxes have a real label,
+        # there's nothing useful to report and a real risk of asserting a
+        # fake structure, so skip it entirely.
+        if not any(s.label for s in shapes if s.kind == "box"):
+            continue
         x0 = min(f.bbox[0] for f in members); y0 = min(f.bbox[1] for f in members)
         x1 = max(f.bbox[2] for f in members); y1 = max(f.bbox[3] for f in members)
         out.append(DiagramVisual(bbox=(x0, y0, x1, y1), shapes=shapes,

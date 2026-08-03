@@ -1,0 +1,64 @@
+{
+  "pdf": "book/pdfreference1.7old.pdf",
+  "page": 150,
+  "note": "",
+  "tables": [
+    [
+      [
+        "KEY",
+        "TYPE",
+        "VALUE"
+      ],
+      [
+        "Dests",
+        "name tree",
+        "(Optional; PDF 1.2) A name tree mapping name strings to destinations\n(see “Named Destinations” on page 583)."
+      ],
+      [
+        "AP",
+        "name tree",
+        "(Optional; PDF 1.3) A name tree mapping name strings to annotation\nappearance streams (see Section 8.4.4, “Appearance Streams”)."
+      ],
+      [
+        "JavaScript",
+        "name tree",
+        "(Optional; PDF 1.3) A name tree mapping name strings to document-level\nJavaScript actions (see “JavaScript Actions” on page 709)."
+      ],
+      [
+        "Pages",
+        "name tree",
+        "(Optional; PDF 1.3) A name tree mapping name strings to visible pages for\nuse in interactive forms (see Section 8.6.5, “Named Pages”)."
+      ],
+      [
+        "Templates",
+        "name tree",
+        "(Optional; PDF 1.3) A name tree mapping name strings to invisible (tem­\nplate) pages for use in interactive forms (see Section 8.6.5, “Named Pag­\nes”)."
+      ],
+      [
+        "IDS",
+        "name tree",
+        "(Optional; PDF 1.3) A name tree mapping digital identifiers to Web Cap­\nture content sets (see Section 10.9.3, “Content Sets”)."
+      ],
+      [
+        "URLS",
+        "name tree",
+        "(Optional; PDF 1.3) A name tree mapping uniform resource locators\n(URLs) to Web Capture content sets (see Section 10.9.3, “Content Sets”)."
+      ],
+      [
+        "EmbeddedFiles",
+        "name tree",
+        "(Optional; PDF 1.4) A name tree mapping name strings to file specifica­\ntions for embedded file streams (see Section 3.10.3, “Embedded File\nStreams”)."
+      ],
+      [
+        "AlternatePresentations",
+        "name tree",
+        "(Optional; PDF 1.4) A name tree mapping name strings to alternate pre­\nsentations (see Section 9.4, “Alternate Presentations”)."
+      ],
+      [
+        "Renditions",
+        "name tree",
+        "(Optional; PDF 1.5) A name tree mapping name strings (which must have\nUnicode encoding) to rendition objects (see Section 9.1.2, “Renditions”)."
+      ]
+    ]
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "pdf": "book/postgresql-18-A4.pdf",
+  "page": 200,
+  "note": "date/time format reference table, 2 cols with wrapped multi-line description cells",
+  "tables": [
+    [
+      [
+        "Example",
+        "Description"
+      ],
+      [
+        "1999-01-08",
+        "ISO 8601; January 8 in any mode (recommended format)"
+      ],
+      [
+        "January 8, 1999",
+        "unambiguous in any datestyle input mode"
+      ],
+      [
+        "1/8/1999",
+        "January 8 in MDY mode; August 1 in DMY mode"
+      ],
+      [
+        "1/18/1999",
+        "January 18 in MDY mode; rejected in other modes"
+      ],
+      [
+        "01/02/03",
+        "January 2, 2003 in MDY mode; February 1, 2003 in DMY mode;\nFebruary 3, 2001 in YMD mode"
+      ],
+      [
+        "1999-Jan-08",
+        "January 8 in any mode"
+      ]
+    ]
+  ]
+}

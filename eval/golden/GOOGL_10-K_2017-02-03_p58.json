@@ -1,0 +1,171 @@
+{
+  "pdf": "book/GOOGL_10-K_2017-02-03.pdf",
+  "page": 58,
+  "note": "wide financial-statement table, dollar-sign/parenthetical-negative columns",
+  "tables": [
+    [
+      [
+        "United Kingdom revenues",
+        "$",
+        "6,483",
+        "$",
+        "7,067",
+        "$",
+        "7,787"
+      ],
+      [
+        "Exclude: Foreign exchange impact on current year\nrevenues using prior period rates",
+        "",
+        "N/A",
+        "",
+        "N/A",
+        "$",
+        "826"
+      ],
+      [
+        "Exclude: Hedging (gains) recognized",
+        "$",
+        "(3 )",
+        "$",
+        "(133 )",
+        "$",
+        "(297 )"
+      ],
+      [
+        "Constant currency United Kingdom revenues",
+        "$",
+        "6,480",
+        "$",
+        "6,934",
+        "$",
+        "8,316"
+      ],
+      [
+        "United Kingdom revenue growth rate",
+        "",
+        "",
+        "",
+        "9 %",
+        "",
+        "10 %"
+      ],
+      [
+        "United Kingdom constant currency revenue growth rate",
+        "",
+        "",
+        "",
+        "15 %",
+        "",
+        "20 %"
+      ],
+      [
+        "Rest of the world revenues",
+        "$",
+        "30,036",
+        "$",
+        "33,112",
+        "$",
+        "39,704"
+      ],
+      [
+        "Exclude: Foreign exchange impact on current year\nrevenues using prior period rates",
+        "",
+        "N/A",
+        "",
+        "N/A",
+        "",
+        "447"
+      ],
+      [
+        "Exclude: Hedging (gains) recognized",
+        "",
+        "(169 )",
+        "",
+        "(1,267 )",
+        "",
+        "(242 )"
+      ],
+      [
+        "Constant currency Rest of the world revenues",
+        "$",
+        "29,867",
+        "$",
+        "31,845",
+        "$",
+        "39,909"
+      ],
+      [
+        "Rest of the world revenue growth rate",
+        "",
+        "",
+        "",
+        "10 %",
+        "",
+        "20 %"
+      ],
+      [
+        "Rest of the world constant currency revenue growth rate",
+        "",
+        "",
+        "",
+        "24 %",
+        "",
+        "25 %"
+      ],
+      [
+        "United States revenues",
+        "$",
+        "29,482",
+        "$",
+        "34,810",
+        "$",
+        "42,781"
+      ],
+      [
+        "United States revenue growth rate",
+        "",
+        "",
+        "",
+        "18 %",
+        "",
+        "23 %"
+      ],
+      [
+        "Total consolidated revenues",
+        "$",
+        "66,001",
+        "$",
+        "74,989",
+        "$",
+        "90,272"
+      ],
+      [
+        "Constant currency total consolidated revenues",
+        "$",
+        "65,829",
+        "$",
+        "73,589",
+        "$",
+        "91,006"
+      ],
+      [
+        "Total consolidated revenue growth rate",
+        "",
+        "",
+        "",
+        "14 %",
+        "",
+        "20 %"
+      ],
+      [
+        "Constant currency total consolidated revenue growth rate",
+        "",
+        "",
+        "",
+        "20 %",
+        "",
+        "24 %"
+      ]
+    ]
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "pdf": "book/sample-10-page-pdf-a4-size.pdf",
+  "page": 9,
+  "note": "center-aligned Metric/Sales panel-framed table, no rules",
+  "tables": [
+    [
+      [
+        "Metric",
+        "Sales"
+      ],
+      [
+        "Market Size",
+        "$50 Billion"
+      ],
+      [
+        "User Satisfaction",
+        "85%"
+      ],
+      [
+        "Growth Rate",
+        "10%"
+      ]
+    ]
+  ]
+}
