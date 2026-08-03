@@ -1536,10 +1536,31 @@ def _merge_marker_columns(by_col: dict[int, list[Span]], min_rows: int = 3, shor
             continue
         # Neither side qualifies as a short marker column -- check for
         # strict row-correspondence instead (same signal, without the
-        # length requirement).
+        # length requirement). But row-correspondence ALONE isn't enough:
+        # two ordinary, roughly-equal-width columns of running prose (an
+        # academic paper's standard 2-column layout) naturally have most
+        # of their rows land within a line-height of each other too, since
+        # both columns share the same font size and leading throughout the
+        # page -- that's an artifact of consistent typesetting, not
+        # evidence the two columns are actually one row-paired unit
+        # (confirmed real case: a 2-column arXiv paper's genuinely
+        # independent columns scored >=0.7 row-match purely from shared
+        # line-height, and got wrongly merged into one page-wide flow
+        # region, collapsing the whole page to 1 detected column). A real
+        # marker/content pairing (or code/comment pairing) is asymmetric
+        # in WIDTH even when neither side is short enough to trip the
+        # length check above -- requiring the narrower column to be
+        # meaningfully narrower, not just "happens to have fewer or
+        # shorter lines," is what a normal 2-column paper's near-equal
+        # widths never satisfy.
         smaller, larger, src, dst = ((a_lines, b_lines, a, b) if len(a_lines) <= len(b_lines)
                                      else (b_lines, a_lines, b, a))
-        if _row_match_frac(smaller, larger) >= 0.7:
+        smaller_w = max((s.bbox[2] for ln in smaller for s in ln), default=0) - \
+                    min((s.bbox[0] for ln in smaller for s in ln), default=0)
+        larger_w = max((s.bbox[2] for ln in larger for s in ln), default=0) - \
+                   min((s.bbox[0] for ln in larger for s in ln), default=0)
+        if (larger_w > 0 and smaller_w / larger_w < 0.7
+                and _row_match_frac(smaller, larger) >= 0.7):
             by_col[dst] = by_col[dst] + by_col[src]
             by_col[src] = []
 
@@ -1848,12 +1869,30 @@ def _column_of(x_center: float, boundaries: list[float], rtl: bool = True) -> in
 
 
 def detect_columns(regions: list[Region], page_width: float, page_height: float,
-                   min_gap: float = 10.0, rtl: bool = True) -> int:
+                   min_gap: float = 10.0, rtl: bool = True,
+                   spans: list[Span] | None = None) -> int:
     """Whitespace-projection column finder. Returns number of columns and
-    tags each region with its column index (0 = read first)."""
+    tags each region with its column index (0 = read first).
+
+    Boundaries are computed from `spans` (the page's raw text spans) when
+    given, not from `regions`' own bboxes -- by the time this runs, a
+    genuinely 2-column page's text has often already been correctly
+    clustered into just 2-3 wide flow regions (one per column, one for a
+    stray footer), and re-deriving the gutter from those few COARSE boxes
+    is a much lower-resolution signal than the hundreds of individual
+    spans assign_spans already used to get the split right in the first
+    place (confirmed real case: a 2-column arXiv paper's spans correctly
+    split 85/130 across two columns, producing two properly-separated
+    flow regions -- but re-running gutter detection on just those 2-3
+    region bboxes here failed to find the same gutter, collapsing both
+    back into one column and discarding the correct split). Falling back
+    to region bboxes when spans aren't available keeps this usable in
+    contexts (tests, etc.) that only have regions.
+    """
     if not regions:
         return 0
-    boundaries = _column_boundaries([r.bbox for r in regions], page_width, page_height, min_gap)
+    boundaries = _column_boundaries([s.bbox for s in spans] if spans else [r.bbox for r in regions],
+                                    page_width, page_height, min_gap)
     ncols = len(boundaries) - 1
     for r in regions:
         r.column = _column_of(r.x_center, boundaries, rtl)
@@ -1907,8 +1946,9 @@ def rtl_xy_cut(regions: list[Region], min_gap: float = 14.0, depth: int = 0, rtl
     return sorted(regions, key=key)
 
 
-def order_regions(regions: list[Region], page_width: float, page_height: float, rtl: bool = True) -> list[Region]:
-    detect_columns(regions, page_width, page_height, rtl=rtl)
+def order_regions(regions: list[Region], page_width: float, page_height: float, rtl: bool = True,
+                  spans: list[Span] | None = None) -> list[Region]:
+    detect_columns(regions, page_width, page_height, rtl=rtl, spans=spans)
     ordered = rtl_xy_cut(regions, rtl=rtl)
     for i, r in enumerate(ordered):
         r.order = i

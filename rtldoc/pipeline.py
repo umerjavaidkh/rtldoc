@@ -365,7 +365,7 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
 
     regions = propose_regions(prim)
     regions = assign_spans(prim, regions)
-    regions = order_regions(regions, prim.width, prim.height, rtl=is_rtl_page)
+    regions = order_regions(regions, prim.width, prim.height, rtl=is_rtl_page, spans=prim.spans)
     result.columns = len({r.column for r in regions})
     _link_activities(regions)
 
