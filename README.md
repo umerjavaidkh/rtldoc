@@ -20,6 +20,13 @@ and vector tables.
 - **Deterministic & auditable.** Every output traces to a rule you can point
   at. CPU-only, **6–60 pages/sec**, $0/page — a VLM is 100–1000× the cost and
   can't be audited.
+- **Page visual summary, no vision model.** Opt-in (`--visual`) geometry pass
+  that turns a page's own vector drawings into a structured summary: image
+  size/color stats, table dimensions, and — for vector flowcharts/diagrams —
+  the actual boxes, their text labels, and which ones a connecting line joins.
+  Built entirely from the PDF's own drawing commands (PyMuPDF `get_drawings()`),
+  not a screenshot or a guess. HTML output renders any detected diagram as a
+  real chart via Mermaid.js, fed the extracted nodes/edges directly.
 
 ## Proven at scale
 
@@ -60,6 +67,7 @@ Then:
 ```bash
 rtldoc parse book.pdf --md out/ --json out.json
 rtldoc parse book.pdf --html out_html/   # real <table>/<figure>, RTL-aware dir=
+rtldoc parse book.pdf --html out_html/ --visual  # + diagram/image/table visual summary
 rtldoc audit book.pdf                    # flags low-confidence pages for review
 ```
 
@@ -79,8 +87,20 @@ plus structured JSON, or a self-contained HTML page per PDF page.
 - Borderless-table *grid geometry* is approximate on the hardest wide,
   multi-level-header tables (occasional row/column structure mismatches
   — that's the 0.942 TEDS on our graded case, not 1.0).
-- Scanned / no-text-layer pages are flagged for OCR, not yet parsed inline.
+- Scanned / no-text-layer pages are flagged for OCR, not yet parsed inline
+  (see Roadmap).
 - Best semantic typing needs a one-time per-publisher style map (~20 min).
+- Diagram detection reconstructs simple box-and-arrow flowcharts reliably;
+  dense multi-level diagrams (deep tree/org-chart hierarchies with many
+  branches) get correct node/box detection but not yet reliable connection
+  tracing — a harder, separate problem noted for future work.
+
+## Roadmap
+
+- **OCR for scanned pages.** Pages with no text layer are currently flagged,
+  not parsed. Next phase: route them through Tesseract for inline text
+  extraction instead of a manual-review flag.
+- Reliable connection tracing for dense/branching diagrams (see above).
 
 ---
 
