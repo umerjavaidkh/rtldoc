@@ -698,7 +698,18 @@ def to_html(result: PageResult) -> str:
         out.append("</ul>")
     if result.visual is not None:
         out.append(f'<section class="visual-summary"><h3>Visual Summary</h3>'
-                   f'<p>{_html.escape(result.visual.description)}</p></section>')
+                   f'<p>{_html.escape(result.visual.description)}</p>')
+        for d in result.visual.diagrams:
+            if d.crop_png_b64:
+                out.append(f'<p class="diagram-label">Extracted image (rendered directly '
+                          f'from the page, correct regardless of diagram complexity):</p>'
+                          f'<img class="diagram-crop" alt="diagram crop" '
+                          f'style="max-width:100%;height:auto;border:1px solid #ddd" '
+                          f'src="data:image/png;base64,{d.crop_png_b64}">')
+            out.append('<p class="diagram-label">Detected structure (best-effort; may be '
+                      'incomplete for complex diagrams):</p>')
+            out.append(visual.render_diagram_svg(d))
+        out.append('</section>')
     out.append("</section>")
     return "\n".join(out)
 

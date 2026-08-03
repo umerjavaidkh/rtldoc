@@ -19,6 +19,7 @@ pattern (see layout._cluster_rules).
 
 from __future__ import annotations
 
+import html
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -41,6 +42,10 @@ class DiagramShape:
     bbox: Rect
     color: tuple[float, float, float]
     label: str = ""
+    # The line's own drawn path (bends and all) -- needed to actually draw
+    # it back out; a bbox alone flattens a bent connector into a straight
+    # diagonal. None for box shapes, where the bbox alone is the shape.
+    points: tuple[tuple[float, float], ...] | None = None
 
 
 @dataclass
@@ -48,6 +53,13 @@ class DiagramVisual:
     bbox: Rect
     shapes: list[DiagramShape] = field(default_factory=list)
     connections: list[tuple[str, str]] = field(default_factory=list)
+    # A rasterized crop of this exact region, straight off the page's own
+    # renderer -- correct for ANY diagram regardless of how many boxes,
+    # branches, or curved paths it has, since it's a pixel-accurate capture
+    # rather than a semantic box/line reconstruction. The box+line model
+    # above (shapes/connections) only reconstructs cleanly for simple
+    # flowcharts; this crop is what stays right even when that doesn't.
+    crop_png_b64: str | None = None
 
 
 @dataclass
@@ -102,6 +114,22 @@ def _pixmap_colors(pix: "object", k: int = 3) -> tuple[list[str], float]:
     top = [_hex(tuple(float(c) / 255 for c in colors[i])) for i in order]
     diversity = len(colors) / max(1, small.shape[0] // 8)
     return top, min(1.0, diversity)
+
+
+def _render_crop_png(page: "object", bbox: Rect, pad: float = 4.0, zoom: float = 2.0) -> str:
+    """Rasterize exactly this region of the page via PyMuPDF's own renderer
+    -- the same renderer that draws the whole page, so it reproduces any
+    curve, gradient, or fine detail correctly regardless of how complex the
+    underlying vector art is. Returned as a base64 PNG data URI payload so
+    the HTML/JSON output stays self-contained (no extra image files to
+    track alongside embedded page images, which are looked up by xref
+    instead)."""
+    import base64
+    import fitz
+    x0, y0, x1, y1 = bbox
+    clip = fitz.Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad) & page.rect
+    pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(zoom, zoom))
+    return base64.b64encode(pix.tobytes("png")).decode("ascii")
 
 
 def describe_image(page: "object", bbox: Rect, zoom: float = 1.0) -> ImageVisual:
@@ -220,39 +248,185 @@ def detect_diagrams(prim: PagePrimitives, claimed: list[Rect], min_shapes: int =
             label = _nearest_label(f.bbox, prim.spans)
             shapes.append(DiagramShape(kind="box", bbox=f.bbox, color=f.color, label=label))
         for f in lines:
-            shapes.append(DiagramShape(kind="line", bbox=f.bbox, color=f.color))
+            shapes.append(DiagramShape(kind="line", bbox=f.bbox, color=f.color, points=f.points))
 
-        # infer connections: a line's own endpoints, each close to some
-        # box's own boundary, mean that line joins those boxes
-        connections: set[tuple[str, str]] = set()
-        for f in lines:
-            touched = []
+        # infer connections: a line's own points, each close to some box's
+        # own boundary, mean that line joins those boxes.
+        def _touched_boxes(f: Fill) -> list[tuple[str, Rect]]:
+            touched: list[tuple[str, Rect]] = []
+            seen: set[str] = set()
             for x, y in f.points:
                 for shp in shapes:
                     if shp.kind != "box":
                         continue
                     bx0, by0, bx1, by1 = shp.bbox
                     if bx0 - pad <= x <= bx1 + pad and by0 - pad <= y <= by1 + pad:
-                        touched.append(shp.label or f"box@{round(bx0)},{round(by0)}")
+                        key = shp.label or f"box@{round(bx0)},{round(by0)}"
+                        if key not in seen:
+                            seen.add(key)
+                            touched.append((key, shp.bbox))
                         break
-            for a, b in zip(sorted(set(touched)), sorted(set(touched))[1:]):
-                if a != b:
-                    connections.add((a, b))
+            return touched
 
-        # Require at least one real box-to-box connection. This is the
+        def _is_straight(f: Fill) -> bool:
+            # A STRAIGHT path (its own drawn length barely exceeds the
+            # straight-line distance between its first and last point) is
+            # an unambiguous direct connector. A path that DETOURS well
+            # beyond that (down, across, and back up again -- a bracket/
+            # T-junction shape) only proves those boxes sit near a SHARED
+            # trunk, not that they're directly linked to each other
+            # (confirmed real case: a bracket-shaped connector down from
+            # two side-by-side source boxes, across, and back up, was a
+            # detour 70%+ longer than a direct line between them, and
+            # asserting a direct edge from it invented a connection between
+            # two boxes sharing no real edge at all -- while a DIFFERENT
+            # diagram's simple straight same-row connectors, which must
+            # still connect normally, need to survive this check).
+            if len(f.points) < 2:
+                return True
+            path_len = sum(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+                          for (x1, y1), (x2, y2) in zip(f.points, f.points[1:]))
+            (sx, sy), (ex, ey) = f.points[0], f.points[-1]
+            straight = ((ex - sx) ** 2 + (ey - sy) ** 2) ** 0.5
+            return straight == 0 or path_len <= straight * 1.3
+
+        def _point_seg_dist(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+            dx, dy = x2 - x1, y2 - y1
+            seg_len2 = dx * dx + dy * dy
+            if seg_len2 == 0:
+                return ((px - x1) ** 2 + (py - y1) ** 2) ** 0.5
+            t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / seg_len2))
+            cx, cy = x1 + t * dx, y1 + t * dy
+            return ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5
+
+        def _lines_touch(f1: Fill, f2: Fill) -> bool:
+            # A short connector's own ENDPOINT routinely lands partway ALONG
+            # another line's segment (e.g. a bracket's flat horizontal run),
+            # not exactly on one of that line's own corner points -- plain
+            # point-to-point proximity misses this entirely (confirmed real
+            # case: a vertical bridge segment's top endpoint sits at the
+            # midpoint of a bracket's 190pt-long horizontal run, over 90pt
+            # from either of the bracket's own corners, yet visibly meets it
+            # dead center). Point-to-SEGMENT distance is what actually
+            # captures "touches this line," not just "touches one of its
+            # explicitly recorded vertices."
+            for px, py in f1.points:
+                for (x1, y1), (x2, y2) in zip(f2.points, f2.points[1:]):
+                    if _point_seg_dist(px, py, x1, y1, x2, y2) <= pad:
+                        return True
+            return False
+
+        touched_by_line = {id(f): _touched_boxes(f) for f in lines}
+        connections: set[tuple[str, str]] = set()
+        for f in lines:
+            if not _is_straight(f):
+                continue
+            direct = touched_by_line[id(f)]
+            # A short straight connector that only reaches ONE box directly
+            # can still be the real bridge onward from a shared trunk/hub
+            # it touches (a detour line excluded from direct pairing above,
+            # or another straight segment) -- borrow whatever boxes THAT
+            # other line touches, without pairing those borrowed boxes
+            # with EACH OTHER (only this line's own direct box gets paired
+            # with them): confirmed real case: a short vertical segment
+            # from a bracket's own midpoint down into a single target box
+            # is what actually carries "both siblings feed this box" --
+            # the bracket alone (with no such bridging segment) correctly
+            # stays silent about where its trunk goes.
+            direct_labels = {label for label, _ in direct}
+            borrowed_labels: set[str] = set()
+            for g in lines:
+                if g is f or not _lines_touch(f, g):
+                    continue
+                borrowed_labels.update(label for label, _ in touched_by_line[id(g)])
+            borrowed_labels -= direct_labels
+            for i in range(len(direct)):
+                for j in range(i + 1, len(direct)):
+                    a, _ = direct[i]
+                    b, _ = direct[j]
+                    if a != b:
+                        connections.add(tuple(sorted((a, b))))
+            for a in direct_labels:
+                for b in borrowed_labels:
+                    if a != b:
+                        connections.add(tuple(sorted((a, b))))
+
+        # Require at least one real LINE shape in this cluster (an actual
+        # stroked connector, not just colored rectangles) -- this is the
         # signal that separates a genuine flowchart from a page that merely
-        # has a couple of decorative colored panels near a separator rule:
-        # a flowchart's lines actually join its boxes, decorative ones
-        # don't. Text content is never lost either way (nodes are still
-        # captured as their own passage blocks), so demanding a connection
-        # only gates the "this is a diagram" claim, never the content.
-        if not connections:
+        # has a couple of decorative colored panels near a separator rule.
+        # Deliberately NOT requiring a successfully-inferred connection on
+        # top of that: a real connector can exist in the PDF without this
+        # detector being able to pin down exactly which boxes it joins
+        # (confirmed real case above), and reporting "N shapes, connections
+        # unknown" is still strictly more useful than dropping the whole
+        # diagram back to unstructured text -- text content is never lost
+        # either way, since nodes are always also captured as their own
+        # ordinary passage blocks regardless of what this detector decides.
+        if not lines:
             continue
         x0 = min(f.bbox[0] for f in members); y0 = min(f.bbox[1] for f in members)
         x1 = max(f.bbox[2] for f in members); y1 = max(f.bbox[3] for f in members)
         out.append(DiagramVisual(bbox=(x0, y0, x1, y1), shapes=shapes,
                                  connections=sorted(connections)))
     return out
+
+
+def render_diagram_svg(d: DiagramVisual, pad: float = 12.0) -> str:
+    """Redraw a detected diagram as inline SVG, from the exact same
+    geometry the text description above is built from -- box positions,
+    line paths (bends included, not flattened to a straight bbox
+    diagonal), and colors, all read directly off the PDF's own drawing
+    commands. Not a reconstruction from the description text; the same
+    underlying shapes feed both.
+    """
+    x0, y0, x1, y1 = d.bbox
+    x0 -= pad; y0 -= pad; x1 += pad; y1 += pad
+    w, h = x1 - x0, y1 - y0
+    parts = [
+        f'<svg viewBox="{x0:.1f} {y0:.1f} {w:.1f} {h:.1f}" '
+        f'xmlns="http://www.w3.org/2000/svg" class="diagram-svg" '
+        f'style="max-width:100%;height:auto;border:1px solid #ddd;background:#fff">',
+        '<defs><marker id="rtldoc-arrow" viewBox="0 0 10 10" refX="8" refY="5" '
+        'markerWidth="6" markerHeight="6" orient="auto-start-reverse">'
+        '<path d="M0,0 L10,5 L0,10 z" fill="#555"/></marker></defs>',
+    ]
+    for s in d.shapes:
+        if s.kind != "line" or not s.points:
+            continue
+        pts = " ".join(f"{px:.1f},{py:.1f}" for px, py in s.points)
+        # A DETOUR path (a bracket joining two side-by-side boxes to a
+        # shared trunk, say) has no trustworthy direction of its own --
+        # which endpoint an arrowhead lands on is just an artifact of
+        # which end happens to be listed last in its raw point data, not a
+        # real "flow goes here" signal (this is exactly why the connection
+        # inference above never asserts an edge from a detour line either;
+        # the drawing must not visually claim one it doesn't make in text).
+        # A STRAIGHT segment's direction is trustworthy -- draw its arrow.
+        marker = ""
+        if len(s.points) >= 2:
+            path_len = sum(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+                          for (x1, y1), (x2, y2) in zip(s.points, s.points[1:]))
+            (sx, sy), (ex, ey) = s.points[0], s.points[-1]
+            straight = ((ex - sx) ** 2 + (ey - sy) ** 2) ** 0.5
+            if straight == 0 or path_len <= straight * 1.3:
+                marker = ' marker-end="url(#rtldoc-arrow)"'
+        parts.append(f'<polyline points="{pts}" fill="none" stroke="{_hex(s.color)}" '
+                    f'stroke-width="1.2"{marker}/>')
+    for s in d.shapes:
+        if s.kind != "box":
+            continue
+        bx0, by0, bx1, by1 = s.bbox
+        parts.append(f'<rect x="{bx0:.1f}" y="{by0:.1f}" width="{bx1 - bx0:.1f}" '
+                    f'height="{by1 - by0:.1f}" fill="none" stroke="{_hex(s.color)}" '
+                    f'stroke-width="1.2"/>')
+        if s.label:
+            cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+            parts.append(f'<text x="{cx:.1f}" y="{cy:.1f}" text-anchor="middle" '
+                        f'dominant-baseline="middle" font-size="9" font-family="sans-serif" '
+                        f'fill="{_hex(s.color)}">{html.escape(s.label)}</text>')
+    parts.append('</svg>')
+    return "".join(parts)
 
 
 def describe_table(bbox: Rect, grid: list[list[str]]) -> TableVisual:
@@ -278,6 +452,13 @@ def _render_description(v: PageVisual) -> str:
             if d.connections:
                 conns = "; ".join(f"{a} → {b}" for a, b in d.connections)
                 desc += f", connected as: {conns}"
+            else:
+                # A real connector line was found (that's what qualified
+                # this as a diagram at all), but which boxes it joins
+                # couldn't be pinned down -- saying so plainly beats
+                # silently omitting the clause, which reads as "no
+                # connections exist" rather than "not determined."
+                desc += ", connections not determined"
             parts.append(desc + ".")
     if v.tables:
         for t in v.tables:
@@ -317,6 +498,11 @@ def describe_page(page: "object", prim: PagePrimitives, regions, table_grids: di
                 continue
 
     v.diagrams = detect_diagrams(prim, claimed)
+    for d in v.diagrams:
+        try:
+            d.crop_png_b64 = _render_crop_png(page, d.bbox)
+        except Exception:
+            pass
 
     panel_colors = sorted({_hex(f.color) for f in prim.fills if f.is_panel and not f.is_stroke})
     v.appearance = PageAppearance(

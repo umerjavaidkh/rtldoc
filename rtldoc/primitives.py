@@ -513,14 +513,6 @@ def extract_page(page: "fitz.Page", drop_white_fills: bool = True,
         dtype = d.get("type")
         if dtype not in ("f", "fs", "s"):
             continue
-        # Table grids are very often drawn as stroked lines (type "s"), not
-        # filled rectangles -- the stroke colour is the one that matters for
-        # them, since a stroke-only path has no fill at all.
-        rgb = d.get("color") if dtype == "s" else d.get("fill")
-        if rgb is None:
-            continue
-        if drop_white_fills and _near_white(rgb):
-            continue
         r = d["rect"]
         if r.is_infinite:
             continue
@@ -528,10 +520,35 @@ def extract_page(page: "fitz.Page", drop_white_fills: bool = True,
         # not "empty", that's a line. Only reject it if it has neither
         # dimension (a degenerate point). Filled shapes still need the
         # stricter check: a truly empty fill rect isn't a real shape.
-        if dtype == "s":
+        # "fs" (fill+stroke) gets the SAME exemption as pure "s": a thin
+        # connector is routinely drawn as a fill+stroke path with a
+        # degenerate (zero-width or zero-height) rect rather than a
+        # stroke-only one -- confirmed real case: a flowchart's own
+        # connecting lines (drawn this way) were silently dropped as
+        # "empty fills" below, even though a PDF renderer draws the stroke
+        # portion regardless of the fill area being zero, leaving those
+        # connectors invisible to this extractor while still visibly
+        # rendered on screen.
+        is_degenerate_line = dtype in ("s", "fs") and (r.width < 1e-6 or r.height < 1e-6)
+        if dtype in ("s", "fs"):
             if r.width < 1e-6 and r.height < 1e-6:
                 continue
         elif r.is_empty:
+            continue
+        # Table grids are very often drawn as stroked lines (type "s"), not
+        # filled rectangles -- the stroke colour is the one that matters for
+        # them, since a stroke-only path has no fill at all. A degenerate
+        # "fs" line is the same story: its "fill" is meaningless (there is
+        # no area to fill), so the STROKE colour is what's actually visible
+        # -- using the fill colour there would routinely pick up incidental
+        # white and get the whole line dropped by the white-fill filter
+        # below (confirmed real case: the degenerate connector above had
+        # fill=white/stroke=dark-gray; using fill would've silently
+        # discarded a fully visible dark line as if it were blank).
+        rgb = d.get("color") if (dtype == "s" or is_degenerate_line) else d.get("fill")
+        if rgb is None:
+            continue
+        if drop_white_fills and _near_white(rgb):
             continue
         # A full-page background tint (sometimes drawn with bleed, extending
         # past the crop box entirely) is not a semantic container -- a real
@@ -542,7 +559,7 @@ def extract_page(page: "fitz.Page", drop_white_fills: bool = True,
             continue
         points = _drawing_points(d)
         prim.fills.append(Fill(bbox=(r.x0, r.y0, r.x1, r.y1), color=tuple(rgb),
-                               is_stroke=(dtype == "s"), points=points))
+                               is_stroke=(dtype == "s" or is_degenerate_line), points=points))
 
     for info in page.get_images(full=True):
         xref = info[0]

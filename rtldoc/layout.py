@@ -876,6 +876,47 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
         lo, hi = band[0], band[-1]
         row_lines = lines[lo:hi + 1]                # include wrapped-label rows
         band_spans = [s for ln in row_lines for s in ln]
+
+        # An unrelated intro paragraph just above the table (explaining an
+        # abbreviation used in one of its columns, say) can share a short
+        # coincidental alignment with a real column and get pulled into the
+        # SAME band as a spurious leading "row" or two, pushing the band's
+        # own top edge above the table's real top rule. Trim those leading
+        # lines off BEFORE building the grid (not just relax the framing
+        # check around them) so they don't render as garbled fake rows --
+        # confirmed real case: a character-set table's first page had 2
+        # intro lines ("U -- Undefined code point...") merged in this way;
+        # every later continuation page of the SAME table, without that
+        # intro, was already detected correctly.
+        top_y = min(s.bbox[1] for s in band_spans)
+        bot_y = max(s.bbox[3] for s in band_spans)
+        top_framed = any(abs(r[1] - top_y) <= tol * 5 or abs(r[3] - top_y) <= tol * 5 for r in rules)
+        bot_framed = any(abs(r[1] - bot_y) <= tol * 5 or abs(r[3] - bot_y) <= tol * 5 for r in rules)
+        if not bot_framed and page_bottom is not None:
+            # Generous on purpose: a page's own bottom margin/footer area
+            # (page number, running header) routinely eats 80-90pt, far
+            # more than the tol*5 slack used for an actual drawn rule --
+            # the min_rows/numeric-or-framed/fill-fraction guards further
+            # below are what keeps this from accepting unrelated content,
+            # not a tight distance here.
+            bot_framed = (page_bottom - bot_y) <= tol * 15
+        if not top_framed and bot_framed:
+            interior_rule_ys = [r[1] for r in rules if top_y - tol <= r[1] <= bot_y + tol]
+            if interior_rule_ys:
+                # The TOPMOST interior rule is the table's own top border --
+                # cutting there keeps the header row (right below it) as
+                # part of the table, trimming only the unrelated content
+                # further up that isn't bounded by any rule at all.
+                cut_y = min(interior_rule_ys)
+                new_lo = next((li for li in range(lo, hi + 1)
+                              if lines[li] and min(s.bbox[1] for s in lines[li]) >= cut_y - tol), None)
+                if new_lo is not None and lo < new_lo <= hi:
+                    lo = new_lo
+                    row_lines = lines[lo:hi + 1]
+                    band_spans = [s for ln in row_lines for s in ln]
+                    top_framed = True
+        framed = top_framed and bot_framed
+
         # which columns actually appear in this band
         band_range = set(range(lo, hi + 1))
         band_cols = [c for c in real if c["lines"] & band_range]
@@ -908,34 +949,14 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
         if not aligned:
             continue
         numeric_frac = sum(_is_numeric_cell(s.text) for s in aligned) / len(aligned)
-        # A real drawn rule immediately above AND below this band is
-        # independent, author-drawn evidence of a genuine table (a top
-        # border and bottom border, even with no internal row dividers),
-        # strong enough on its own to accept a non-numeric table --
-        # confirmed real case: an escape-sequence reference table
-        # ("\n" -> "Line feed (LF)", etc.) has neither column numeric, but
-        # is framed by real top/bottom rules exactly like any other table.
-        top_y = min(s.bbox[1] for s in band_spans)
-        bot_y = max(s.bbox[3] for s in band_spans)
-        top_framed = any(abs(r[1] - top_y) <= tol * 5 or abs(r[3] - top_y) <= tol * 5 for r in rules)
-        bot_framed = any(abs(r[1] - bot_y) <= tol * 5 or abs(r[3] - bot_y) <= tol * 5 for r in rules)
-        # A table's last page before it continues onto the next one has no
-        # drawn bottom rule at all (there's nothing there to draw one
-        # against) -- a real top rule plus the band simply running down to
-        # near the page's own bottom margin, with nothing unrelated
-        # following it, is the same kind of independent authored evidence
-        # as a matched bottom rule (confirmed real case: a 5-column
-        # operator-summary table spanning many pages had every page but the
-        # very first end this way, and was rejected outright without this).
-        if not bot_framed and page_bottom is not None:
-            # Generous on purpose: a page's own bottom margin/footer area
-            # (page number, running header) routinely eats 80-90pt, far
-            # more than the tol*5 slack used for an actual drawn rule --
-            # the min_rows/numeric-or-framed/fill-fraction guards already
-            # in this function are what keeps this from accepting
-            # unrelated content, not a tight distance here.
-            bot_framed = (page_bottom - bot_y) <= tol * 15
-        framed = top_framed and bot_framed
+        # A real drawn rule immediately above AND below this band (computed
+        # further up, before the grid itself was built) is independent,
+        # author-drawn evidence of a genuine table -- a top border and
+        # bottom border, even with no internal row dividers -- strong
+        # enough on its own to accept a non-numeric table (confirmed real
+        # case: an escape-sequence reference table ("\n" -> "Line feed
+        # (LF)", etc.) has neither column numeric, but is framed by real
+        # top/bottom rules exactly like any other table).
         if numeric_frac < 0.6 and not framed:
             continue
 
