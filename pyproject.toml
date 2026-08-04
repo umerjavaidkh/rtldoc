@@ -3,7 +3,12 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rtldoc"
+# PyPI distribution name is "pdf-rtldoc" -- "rtldoc" was already taken by
+# an unrelated SystemVerilog documentation tool. The importable module
+# stays `rtldoc` (see [tool.setuptools] below) and the installed CLI
+# command stays `rtldoc` (see [project.scripts]) -- neither has to match
+# the PyPI distribution name.
+name = "pdf-rtldoc"
 version = "1.0.5"
 description = "Geometry-first PDF parser for RTL and complex layouts (Arabic textbooks, financial tables, multi-column docs)"
 readme = "README.md"
@@ -26,6 +31,11 @@ cv = ["opencv-python-headless"]
 # Only tests/make_fixture.py (the synthetic-PDF generator for local testing)
 # needs these; the parser itself never shapes or reverses text on its own.
 dev = ["arabic-reshaper", "python-bidi"]
+
+[project.urls]
+Homepage = "https://github.com/umerjavaidkh/rtldoc"
+Repository = "https://github.com/umerjavaidkh/rtldoc"
+Issues = "https://github.com/umerjavaidkh/rtldoc/issues"
 
 [project.scripts]
 rtldoc = "rtldoc.cli:main"

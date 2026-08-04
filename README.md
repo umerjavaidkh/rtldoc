@@ -57,7 +57,15 @@ saved reports).
 
 ## Use it
 
-Install without cloning, pinned to the release:
+```bash
+pip install pdf-rtldoc
+```
+
+(Published on PyPI as `pdf-rtldoc` -- the plain `rtldoc` name was already
+taken by an unrelated project. The installed command, and the module you
+import in Python, are both still `rtldoc`.)
+
+Or install straight from a specific release without going through PyPI:
 
 ```bash
 pip install "git+https://github.com/umerjavaidkh/rtldoc.git@v1.0.5"
@@ -117,6 +125,18 @@ plus structured JSON, or a self-contained HTML page per PDF page.
 - A cell-level golden regression corpus (`eval/golden/` + `eval/regression.py`)
   now exists and grows with each table-detection fix; still short of full
   coverage across document types.
+
+## Publishing a release (maintainers)
+
+Bump `version` in `pyproject.toml`, commit, tag (`git tag -a vX.Y.Z`), push
+the tag, then publish a GitHub Release from it. `.github/workflows/publish.yml`
+builds and uploads to PyPI automatically when the release is published, via
+PyPI's Trusted Publisher (OIDC) mechanism — no API token stored anywhere.
+
+One-time setup (already done for `pdf-rtldoc`): on pypi.org, under the
+project's *Publishing* settings, add a trusted publisher with owner
+`umerjavaidkh`, repository `rtldoc`, workflow filename `publish.yml`, and
+environment name `pypi`.
 
 ---
 
