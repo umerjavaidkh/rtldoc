@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rtldoc"
-version = "1.0.4"
+version = "1.0.5"
 description = "Geometry-first PDF parser for RTL and complex layouts (Arabic textbooks, financial tables, multi-column docs)"
 readme = "README.md"
 license = { text = "MIT" }

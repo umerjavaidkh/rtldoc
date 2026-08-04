@@ -60,7 +60,7 @@ saved reports).
 Install without cloning, pinned to the release:
 
 ```bash
-pip install "git+https://github.com/umerjavaidkh/rtldoc.git@v1.0.4"
+pip install "git+https://github.com/umerjavaidkh/rtldoc.git@v1.0.5"
 ```
 
 Then:
