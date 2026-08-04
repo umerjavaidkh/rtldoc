@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 # command stays `rtldoc` (see [project.scripts]) -- neither has to match
 # the PyPI distribution name.
 name = "pdf-rtldoc"
-version = "1.0.5"
+version = "1.0.6"
 description = "Geometry-first PDF parser for RTL and complex layouts (Arabic textbooks, financial tables, multi-column docs)"
 readme = "README.md"
 license = { text = "MIT" }

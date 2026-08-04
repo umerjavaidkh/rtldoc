@@ -68,7 +68,7 @@ import in Python, are both still `rtldoc`.)
 Or install straight from a specific release without going through PyPI:
 
 ```bash
-pip install "git+https://github.com/umerjavaidkh/rtldoc.git@v1.0.5"
+pip install "git+https://github.com/umerjavaidkh/rtldoc.git@v1.0.6"
 ```
 
 Then:
