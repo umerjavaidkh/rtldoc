@@ -13,6 +13,28 @@ version = "1.0.6"
 description = "Geometry-first PDF parser for RTL and complex layouts (Arabic textbooks, financial tables, multi-column docs)"
 readme = "README.md"
 license = { text = "MIT" }
+keywords = [
+    "pdf",
+    "pdf parser",
+    "document parser",
+    "pdf extraction",
+    "layout analysis",
+    "ocr",
+    "rag",
+    "graphrag",
+    "llm",
+    "document ai",
+    "table extraction",
+    "markdown",
+    "html",
+    "rtl",
+    "arabic",
+    "urdu",
+    "hebrew",
+    "persian",
+    "multi-column pdf",
+    "financial reports",
+]
 requires-python = ">=3.10"
 dependencies = [
     "pymupdf>=1.24",
