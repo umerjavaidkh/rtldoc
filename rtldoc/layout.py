@@ -1358,8 +1358,47 @@ def propose_regions(prim: PagePrimitives, min_panel_area: float = 2000.0) -> lis
     # borderless detection only where a drawn-rule table doesn't already cover
     # the area, so the two never fight over the same grid
     for bt in detect_borderless_tables(prim):
-        if not any(containment(bt.bbox, t.bbox) > 0.3 or containment(t.bbox, bt.bbox) > 0.3
-                   for t in tables):
+        # A real table's OWN subtotal/total row is routinely underlined with
+        # an actual drawn rule -- detect_tables then finds a tiny "table"
+        # covering just that one ruled row, entirely inside the bigger table
+        # the borderless voter (correctly) found around it. Discarding the
+        # borderless candidate whenever it overlaps ANY ruled table treated
+        # that as a duplicate and kept only the tiny fragment (confirmed
+        # real case: a 9-column/11-row employee-demographics table -- header
+        # plus 6 data rows plus a 3-row ruled "Total" section -- collapsed to
+        # just its own 3-row totals section, losing the header and all 6
+        # data rows, because the totals section's own underline made
+        # detect_tables see a small table there first). When the ruled
+        # table(s) a candidate overlaps are near-fully CONTAINED inside it
+        # (not just overlapping it) and it's strictly more complete, it's
+        # the ruled table that's redundant, not the borderless one -- drop
+        # the fragment(s) in favor of the region that actually has them
+        # covered.
+        #
+        # The area check matters: high mutual containment alone doesn't
+        # distinguish "small fragment inside a big table" from "same table,
+        # both detectors found roughly the same extent" -- two boxes that
+        # differ only by a few points of tolerance/padding slop are >=0.85
+        # contained in EACH OTHER too. Only when the ruled table covers a
+        # clearly smaller fraction of the candidate's area is it a genuine
+        # sub-fragment; otherwise the ruled table's own drawn rules are
+        # still the stronger evidence and should win as before (confirmed
+        # real case: a definition-list table where the borderless voter
+        # covered virtually the same box as the ruled table -- ratio 1.04,
+        # not a fragment -- but split a wrapped description line into a
+        # spurious extra column; the correctly-ruled 18-cell grid must win
+        # over the borderless voter's worse 24-cell one there).
+        def _area(b):
+            return (b[2] - b[0]) * (b[3] - b[1])
+
+        subsumed = [t for t in tables
+                    if containment(t.bbox, bt.bbox) >= 0.85 and _area(t.bbox) <= 0.7 * _area(bt.bbox)]
+        if subsumed and len(bt.cells) > sum(len(t.cells) for t in subsumed):
+            for t in subsumed:
+                tables.remove(t)
+            tables.append(bt)
+        elif not any(containment(bt.bbox, t.bbox) > 0.3 or containment(t.bbox, bt.bbox) > 0.3
+                     for t in tables):
             tables.append(bt)
     regions.extend(tables)
 
@@ -1476,6 +1515,50 @@ def _split_repeated_span(s: Span, tables: list[Region]) -> list[Span]:
     ]
 
 
+def _split_multi_cell_span(s: Span, tables: list[Region]) -> list[Span]:
+    """Split a span holding multiple DIFFERENT table cells' values drawn as
+    one PDF text run, e.g. "904 19,146" for two adjacent numeric columns
+    whose gap was too tight for the PDF generator to break into separate
+    text-showing runs.
+
+    Unlike _split_repeated_span (identical value repeated N times, split
+    evenly), here the values differ and the table's own already-detected
+    cell boundaries are the only reliable place to split -- confirmed real
+    case: a reserves table's per-region DETAIL rows (each column a separate,
+    well-spaced span) column-align cleanly, but its "Total Consolidated"
+    summary rows use tighter kerning between adjacent numbers, so PyMuPDF's
+    own span extraction merges 2-3 of them into one run each; naive
+    containment then dumps the merged run into whichever single cell it
+    overlaps most, cramming several columns' worth of numbers into one and
+    leaving the neighboring cells blank. Two guards keep this narrow:
+    word count must EXACTLY match the number of cells the span
+    geometrically straddles in its own row, AND every word must look
+    numeric. The word-count match alone isn't enough -- a citation-bracketed
+    model name ("DepthAnythingV3 [ 23 ]") or a reference table's descriptive
+    cell ("0006 U+0006 (ACKNOWLEDGE)") can coincidentally have the same word
+    count as the columns they straddle and are a single semantic value, not
+    several -- confirmed real regressions where splitting either corrupted
+    the cell instead of fixing it. A genuinely merged multi-column run is,
+    like the columns it belongs to, numeric.
+    """
+    for t in tables:
+        if containment(s.bbox, t.bbox) <= 0.6:
+            continue
+        cy = (s.bbox[1] + s.bbox[3]) / 2
+        row_cells = sorted((c for c in t.cells if c.bbox[1] - 1 <= cy <= c.bbox[3] + 1),
+                           key=lambda c: c.bbox[0])
+        straddled = [c for c in row_cells if s.bbox[0] < c.bbox[2] and s.bbox[2] > c.bbox[0]]
+        if len(straddled) < 2:
+            continue
+        words = s.text.split()
+        if len(words) != len(straddled) or not all(_is_numeric_cell(w) for w in words):
+            continue
+        return [Span(text=w, bbox=(c.bbox[0], s.bbox[1], c.bbox[2], s.bbox[3]),
+                     font=s.font, size=s.size, color=s.color, flags=s.flags, dir=s.dir)
+               for w, c in zip(words, straddled)]
+    return [s]
+
+
 def _merge_marker_columns(by_col: dict[int, list[Span]], min_rows: int = 3, short_frac: float = 0.8) -> None:
     """Merge a narrow marker/number column's spans into its adjacent wide
     content column when their entries share the same row.
@@ -1577,6 +1660,75 @@ def _merge_marker_columns(by_col: dict[int, list[Span]], min_rows: int = 3, shor
             by_col[src] = []
 
 
+def _find_disjoint_column_split(cells: list[Region], max_collision_frac: float = 0.2) -> int | None:
+    """First column index k such that almost no row has content on both
+    sides of it -- see split_disjoint_tables for what this signals.
+
+    Not a strict zero: a wrapped 2-line entry's own continuation (e.g. a
+    page number wrapping onto its own line) can coincidentally land on the
+    same row-band as the NEXT column's unrelated entry, purely from
+    row-clustering tolerance (confirmed real case: a table-of-contents
+    entry's wrapped page number sat on the same row as an unrelated
+    right-column "Note 18" entry -- 1 collision out of 9 rows). Requiring
+    the collision rate to stay low, rather than absent, tolerates that kind
+    of noise without accepting a genuinely single, correspondent table
+    (which collides on nearly every row by definition).
+    """
+    if not cells:
+        return None
+    ncols = max(c.table_col for c in cells) + 1
+    nrows = max(c.table_row for c in cells) + 1
+    if ncols < 2:
+        return None
+    has = [[False] * ncols for _ in range(nrows)]
+    for c in cells:
+        if c.spans:
+            has[c.table_row][c.table_col] = True
+    for k in range(1, ncols):
+        left_rows = [any(has[ri][ci] for ci in range(k)) for ri in range(nrows)]
+        right_rows = [any(has[ri][ci] for ci in range(k, ncols)) for ri in range(nrows)]
+        populated = sum(l or r for l, r in zip(left_rows, right_rows))
+        collisions = sum(l and r for l, r in zip(left_rows, right_rows))
+        if populated == 0 or collisions / populated > max_collision_frac:
+            continue
+        if sum(left_rows) >= 2 and sum(right_rows) >= 2:
+            return k
+    return None
+
+
+def split_disjoint_tables(regions: list[Region]) -> list[Region]:
+    """A page can lay two INDEPENDENT lists side by side purely to save
+    space -- a table-of-contents' "Title .... page#" list beside an
+    unrelated "Note N .... page#" list, say -- and column detection has no
+    way to know they aren't one table, merging them into a single grid
+    where every row is half-blank (confirmed real case: a 10-K's table of
+    contents, two lists with different line-wrapping rhythms and no
+    row-for-row relationship, merged into one 4-column table with every
+    row populated on only one side). The tell is structural, not textual:
+    a real table's rows populate multiple columns TOGETHER, by definition.
+    If no row ever has content on both sides of some column boundary, this
+    was never one table -- splitting there recovers two coherent tables
+    instead of one riddled with holes. Must run after assign_spans (needs
+    to know which cells actually have content) and before order_regions
+    (so each half gets its own reading-order position).
+    """
+    out = []
+    for r in regions:
+        if r.kind != "table" or not r.cells:
+            out.append(r)
+            continue
+        k = _find_disjoint_column_split(r.cells)
+        if k is None:
+            out.append(r)
+            continue
+        for cells in ([c for c in r.cells if c.table_col < k],
+                      [c for c in r.cells if c.table_col >= k]):
+            x0 = min(c.bbox[0] for c in cells); y0 = min(c.bbox[1] for c in cells)
+            x1 = max(c.bbox[2] for c in cells); y1 = max(c.bbox[3] for c in cells)
+            out.append(Region(bbox=(x0, y0, x1, y1), kind="table", cells=cells))
+    return out
+
+
 def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.6) -> list[Region]:
     """Drop every span into its tightest containing region; leftovers become
     free-flow regions clustered by line proximity, column by column."""
@@ -1585,7 +1737,9 @@ def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.
     containers = [r for r in regions if r.kind in ("panel", "figure")]
     orphans: list[Span] = []
 
-    spans = [sub for s in prim.spans for sub in _split_repeated_span(s, tables)]
+    spans = [sub2 for s in prim.spans
+             for sub in _split_repeated_span(s, tables)
+             for sub2 in _split_multi_cell_span(sub, tables)]
     for s in spans:
         placed = False
         for t in tables:

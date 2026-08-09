@@ -24,7 +24,7 @@ from dataclasses import dataclass, field, asdict
 import fitz
 
 from . import arabic, visual
-from .layout import Region, assign_spans, group_by_line, order_regions, propose_regions
+from .layout import Region, assign_spans, group_by_line, order_regions, propose_regions, split_disjoint_tables
 from .primitives import PagePrimitives, Span, containment, extract_page, style_profile
 
 DIGITS = re.compile(r"^[\s\u0660-\u0669\u06F0-\u06F90-9]{1,3}$")
@@ -365,6 +365,7 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
 
     regions = propose_regions(prim)
     regions = assign_spans(prim, regions)
+    regions = split_disjoint_tables(regions)
     # Column-boundary detection (inside order_regions) needs the page's
     # flowing prose, not a table's own cell text -- a table commonly
     # breaks out to the full content width regardless of the surrounding
