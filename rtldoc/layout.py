@@ -1210,12 +1210,46 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
                 else:
                     lcur = {"xs": [x], "lines": {li}, "last": x}
                     local_clusters.append(lcur)
-            band_cols = [c for c in local_clusters if len(c["lines"]) >= min_rows]
+            # A small table (few voting rows) can lose a genuine column's
+            # vote on just ONE row to source-PDF span merging: tight
+            # kerning between adjacent numbers in a summary/total row
+            # merges 2-3 logically separate values into one text run (see
+            # _split_multi_cell_span), so that row casts fewer column
+            # votes than it should. Requiring the fixed min_rows floor
+            # from EVERY voting row, when the whole band only has a
+            # handful of voting rows to begin with, makes that one row's
+            # information loss fatal to any column it happened to merge
+            # (confirmed real case: a 3-row reserves table -- 2 rows with
+            # clean per-column spans, 1 with several merged -- lost every
+            # column the merged row didn't separately vote for, cramming
+            # several real columns' values into one cell). Scaling the
+            # requirement to the band's OWN voting-row count (never below
+            # 2, never above the global min_rows) tolerates exactly that
+            # loss without loosening anything for a normal-sized table,
+            # where the global floor is already <= this local one.
+            # A line counts as a genuine DATA row here only if it casts
+            # enough votes to look like one -- a wrapped row-label's own
+            # continuation line ("Total" / "Affiliated" / "Companies" each
+            # on their own line) contributes exactly ONE short-text vote,
+            # which would otherwise inflate this count and push
+            # local_min_rows right back up to the unrelaxed global floor,
+            # silently defeating the whole point (confirmed while testing:
+            # counting every voting line, label lines included, computed 6
+            # "rows" for a table with only 3 real data rows, so local_min_
+            # rows came out unchanged at 3 -- min_cols is the same bar
+            # already used elsewhere to call a line tabular at all).
+            line_vote_counts: dict[int, int] = {}
+            for _, li in local_votes:
+                line_vote_counts[li] = line_vote_counts.get(li, 0) + 1
+            voting_lines = {li for li, cnt in line_vote_counts.items() if cnt >= min_cols}
+            local_min_rows = min(min_rows, max(2, len(voting_lines) - 1))
+            band_cols = [c for c in local_clusters if len(c["lines"]) >= local_min_rows]
             band_support = {id(c): len(c["lines"]) for c in band_cols}
         else:
             band_range = set(range(lo, hi + 1))
             band_cols = [c for c in real if c["lines"] & band_range]
             band_support = {id(c): len(c["lines"] & band_range) for c in band_cols}
+            local_min_rows = min_rows
         # Drop columns whose support *within this band* is weak relative to
         # the band's strongest column. A wide financial table's real data
         # columns are hit by nearly every row (confirmed case: 22-24 of 24
@@ -1229,7 +1263,7 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
         # the band's OWN best column, not an absolute count, so this scales
         # correctly for a small table too.
         max_support = max(band_support.values(), default=0)
-        band_cols = [c for c in band_cols if band_support[id(c)] >= max(min_rows, max_support * 0.4)]
+        band_cols = [c for c in band_cols if band_support[id(c)] >= max(local_min_rows, max_support * 0.4)]
         if len(band_cols) < min_cols:
             continue
         centers = sorted(sum(c["xs"]) / len(c["xs"]) for c in band_cols)
@@ -1762,8 +1796,25 @@ def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.
                 best_cell, best_score = None, 0.0
                 for cell in t.cells:
                     c = containment(s.bbox, cell.bbox)
-                    if c > best_score:
+                    if c > best_score + 1e-6:
                         best_cell, best_score = cell, c
+                    elif best_cell is not None and abs(c - best_score) <= 1e-6:
+                        # A near-exact tie in containment -- a span
+                        # straddling two adjacent cells almost evenly (e.g.
+                        # a 5-digit value split ~50/50 across a column
+                        # boundary) -- breaks in cell-iteration order with
+                        # no signal, which can land it beside the wrong
+                        # neighbor (confirmed real case: "1,062" tied at
+                        # containment 0.5 between its own cell and the one
+                        # to its left, landing left and cramming into that
+                        # cell's value). A real table's numeric cells are
+                        # right-aligned almost universally -- the same
+                        # principle column detection itself already relies
+                        # on -- so on a tie, prefer whichever cell's right
+                        # edge the span's own right edge actually lines up
+                        # with.
+                        if abs(s.bbox[2] - cell.bbox[2]) < abs(s.bbox[2] - best_cell.bbox[2]):
+                            best_cell, best_score = cell, c
                 if best_cell is not None:
                     best_cell.spans.append(s)
                     t.spans.append(s)
