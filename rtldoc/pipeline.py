@@ -406,12 +406,56 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
         for r in regions:
             if r.kind == "table":
                 leaf_regions.extend(r.cells)
+        def _area(b):
+            return max(b[2] - b[0], 0.0) * max(b[3] - b[1], 0.0)
+
         for bb, gtext in geo_lines:
-            best, best_score = None, 1e-6
-            for r in leaf_regions:
-                c = containment(bb, r.bbox)
-                if c > best_score:
-                    best, best_score = r, c
+            # Ties in containment break toward the TIGHTEST (smallest)
+            # region -- the same "drop every span into its tightest
+            # containing region" rule assign_spans already applies to raw
+            # spans, now applied to reconstructed lines too. A line sitting
+            # wholly inside a small region ALSO sits wholly inside whatever
+            # larger container encloses that region, so both score
+            # containment 1.0 and the winner was decided by nothing but
+            # region iteration order. When the big one won, it re-rendered
+            # text the small one already owned at the raw-span level, so
+            # the same content came out twice (confirmed real case: a
+            # token-embedding diagram whose per-token chips each sat inside
+            # one background panel -- the panel claimed every token line and
+            # emitted the whole grid a second time, interleaved with the
+            # chips' own correct per-cell text).
+            #
+            # Only a genuine tie is broken this way, never a difference in
+            # containment: a line covering one small region plus the
+            # ordinary text beside it (an activity-number badge and its
+            # heading, say) is far less contained by the badge than by the
+            # flow region around it, so the flow region still wins on
+            # containment outright -- an earlier version that diverted any
+            # chip-touching line to the chip regardless duplicated text
+            # across 8 more pages of an Arabic textbook.
+            # "Essentially contained" rather than exactly-equal containment:
+            # geobidi pads a line's bbox by a full font size above the
+            # baseline, so a line genuinely inside a tight region routinely
+            # measures a hair under 1.0 against it (0.994 on the confirmed
+            # case) while still measuring exactly 1.0 against the roomier
+            # container -- a difference of rounding, not of ownership, which
+            # an exact-tie test misses entirely.
+            # Scoped to chips deliberately. Table cells are also "tighter"
+            # than the table enclosing them, but a table's cell text is
+            # built from its own raw spans by _table_grid, and handing
+            # cells the geo lines instead changes 12 of the golden
+            # regression fixtures' grids -- so the ownership rule there
+            # stays exactly as it was.
+            enclosing_chips = [r for r in regions
+                               if r.kind == "chip" and containment(bb, r.bbox) >= 0.95]
+            if enclosing_chips:
+                best = min(enclosing_chips, key=lambda r: _area(r.bbox))
+            else:
+                best, best_score = None, 1e-6
+                for r in leaf_regions:
+                    c = containment(bb, r.bbox)
+                    if c > best_score:
+                        best, best_score = r, c
             if best is not None:
                 owned.setdefault(id(best), []).append((bb, gtext))
 
