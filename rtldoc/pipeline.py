@@ -433,6 +433,7 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
             # containment outright -- an earlier version that diverted any
             # chip-touching line to the chip regardless duplicated text
             # across 8 more pages of an Arabic textbook.
+            #
             # "Essentially contained" rather than exactly-equal containment:
             # geobidi pads a line's bbox by a full font size above the
             # baseline, so a line genuinely inside a tight region routinely
@@ -440,6 +441,7 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
             # case) while still measuring exactly 1.0 against the roomier
             # container -- a difference of rounding, not of ownership, which
             # an exact-tie test misses entirely.
+            #
             # Scoped to chips deliberately. Table cells are also "tighter"
             # than the table enclosing them, but a table's cell text is
             # built from its own raw spans by _table_grid, and handing
@@ -448,8 +450,23 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
             # stays exactly as it was.
             enclosing_chips = [r for r in regions
                                if r.kind == "chip" and containment(bb, r.bbox) >= 0.95]
+            # A table is authoritative over its own footprint: any line
+            # sitting mostly inside one belongs to that table, whose grid
+            # already renders the content from its cells' raw spans. Without
+            # this, a line that pokes slightly OUTSIDE the table's bbox
+            # scores under 1.0 against the table but a full 1.0 against the
+            # roomier panel enclosing the whole figure -- so the panel wins
+            # and re-emits the table's own text as loose prose alongside the
+            # rendered grid (confirmed real case: a BERT architecture figure
+            # whose entire diagram came out twice, once flat and once as a
+            # table). Handing the line to the table region rather than to a
+            # cell keeps _table_grid's span-derived cell text untouched.
+            overlapping_tables = [r for r in regions
+                                  if r.kind == "table" and containment(bb, r.bbox) >= 0.5]
             if enclosing_chips:
                 best = min(enclosing_chips, key=lambda r: _area(r.bbox))
+            elif overlapping_tables:
+                best = max(overlapping_tables, key=lambda r: containment(bb, r.bbox))
             else:
                 best, best_score = None, 1e-6
                 for r in leaf_regions:
