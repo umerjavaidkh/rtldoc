@@ -1864,10 +1864,38 @@ def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.
         col = _column_of((s.bbox[0] + s.bbox[2]) / 2, boundaries)
         by_col.setdefault(col, []).append(s)
     _merge_marker_columns(by_col)
+    flows: list[Region] = []
     for col, spans in by_col.items():
         for r in _cluster_flow(spans):
             r.column = col
-            regions.append(r)
+            flows.append(r)
+
+    # A flow region whose bbox sits wholly inside another flow region's is
+    # not a separate paragraph -- it is part of the same one, split off by
+    # the column bucketing above. A full-width caption on a 2-column page
+    # gets its spans bucketed by x like everything else, so the words that
+    # happen to start past the gutter cluster into their own region nested
+    # inside the caption's. Both then render: the outer one from the
+    # geometric lines it owns (the whole caption) and the inner one from
+    # its own raw spans (a subset of that same text), so those words come
+    # out twice (confirmed real case: a BERT figure caption whose "[CLS] is
+    # a special" / "[SEP] is a special separator token" fragments, set in a
+    # different font mid-sentence, were emitted again under the full
+    # caption). Merging the nested region into its container leaves one
+    # region owning the geometric lines, which already carry that text.
+    absorbed = set()
+    for i, inner in enumerate(flows):
+        for j, outer in enumerate(flows):
+            if i == j or j in absorbed or i in absorbed:
+                continue
+            if containment(inner.bbox, outer.bbox) >= 0.99:
+                outer.spans.extend(inner.spans)
+                x0 = min(outer.bbox[0], inner.bbox[0]); y0 = min(outer.bbox[1], inner.bbox[1])
+                x1 = max(outer.bbox[2], inner.bbox[2]); y1 = max(outer.bbox[3], inner.bbox[3])
+                outer.bbox = (x0, y0, x1, y1)
+                absorbed.add(i)
+                break
+    regions.extend(r for k, r in enumerate(flows) if k not in absorbed)
 
     return [r for r in regions if r.spans or r.kind in ("figure", "table")]
 
