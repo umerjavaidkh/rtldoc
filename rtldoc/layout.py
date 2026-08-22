@@ -1385,6 +1385,106 @@ def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, mi
     return out
 
 
+def _proximity_groups(boxes: list[Rect], xmult: float = 1.6, ymult: float = 2.2) -> list[list[Rect]]:
+    """Union-find grouping of boxes that sit close enough to belong to the
+    same figure. Distances are relative to the boxes' own median size, so
+    this scales with the page's drawing scale rather than a fixed constant."""
+    if not boxes:
+        return []
+    mw = float(np.median([b[2] - b[0] for b in boxes]))
+    mh = float(np.median([b[3] - b[1] for b in boxes]))
+    xtol, ytol = mw * xmult, mh * ymult
+    parent = list(range(len(boxes)))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i, a in enumerate(boxes):
+        for j in range(i + 1, len(boxes)):
+            b = boxes[j]
+            dx = max(0.0, max(a[0], b[0]) - min(a[2], b[2]))
+            dy = max(0.0, max(a[1], b[1]) - min(a[3], b[3]))
+            if dx <= xtol and dy <= ytol:
+                ra, rb = find(i), find(j)
+                if ra != rb:
+                    parent[ra] = rb
+    out: dict[int, list[Rect]] = {}
+    for i, b in enumerate(boxes):
+        out.setdefault(find(i), []).append(b)
+    return list(out.values())
+
+
+def _chip_grid_tables(chip_boxes: list[Rect], min_rows: int = 2, min_cols: int = 3,
+                      min_occupancy: float = 0.55) -> tuple[list[Region], set]:
+    """Recover a REGULAR GRID of chips as a real table.
+
+    A chip is a small filled box (see Fill.is_chip) -- an activity-number
+    badge, but also, very commonly, one cell of a hand-drawn figure grid.
+    Papers and Word-converted documents routinely draw a table as a field
+    of uniformly-sized filled boxes with no rules at all, which the rule
+    and alignment table detectors both miss (no rules to find; the text
+    inside the boxes is short and irregular enough that column voting
+    doesn't fire). Each box then surfaces as its own isolated region and
+    the whole structure renders as a flat run of disconnected tokens --
+    confirmed real cases: a BERT paper's input-representation figure
+    (4 rows x 11 tokens: Input / Token / Segment / Position embeddings)
+    and its fine-tuning figure, both of which came out as ~45 loose
+    fragments in reading order with no row or column relationship left.
+
+    The grid itself is the evidence, and it is strong: real rows share a
+    y-centre, real columns share an x-centre, and a genuine grid fills
+    most of its own row x column product. Scattered chips -- an ordinary
+    document's activity badges, one per exercise -- satisfy none of that,
+    which is what keeps this from firing on them.
+
+    Returns (table regions, set of chip bboxes consumed).
+    """
+    used: set = set()
+    tables: list[Region] = []
+    for group in _proximity_groups(chip_boxes):
+        if len(group) < min_rows * min_cols:
+            continue
+        mh = float(np.median([b[3] - b[1] for b in group]))
+        mw = float(np.median([b[2] - b[0] for b in group]))
+        rows = _cluster_1d_boxes(group, key=lambda b: (b[1] + b[3]) / 2, tol=mh * 0.6)
+        cols = _cluster_1d_boxes(group, key=lambda b: (b[0] + b[2]) / 2, tol=mw * 0.6)
+        if len(rows) < min_rows or len(cols) < min_cols:
+            continue
+        if len(group) < len(rows) * len(cols) * min_occupancy:
+            continue
+        row_centers = sorted(sum((b[1] + b[3]) / 2 for b in r) / len(r) for r in rows)
+        col_centers = sorted(sum((b[0] + b[2]) / 2 for b in c) / len(c) for c in cols)
+        rb = _midpoint_bounds(row_centers, min(b[1] for b in group), max(b[3] for b in group))
+        cb = _midpoint_bounds(col_centers, min(b[0] for b in group), max(b[2] for b in group))
+        table = Region(bbox=(cb[0], rb[0], cb[-1], rb[-1]), kind="table")
+        for ri in range(len(rb) - 1):
+            for ci in range(len(cb) - 1):
+                table.cells.append(Region(bbox=(cb[ci], rb[ri], cb[ci + 1], rb[ri + 1]),
+                                          kind="flow", table_row=ri, table_col=ci))
+        tables.append(table)
+        used.update(group)
+    return tables, used
+
+
+def _cluster_1d_boxes(boxes, key, tol):
+    """Greedy proximity clustering of boxes along one axis."""
+    groups: list[list] = []
+    for b in sorted(boxes, key=key):
+        if groups and key(b) - key(groups[-1][-1]) <= tol:
+            groups[-1].append(b)
+        else:
+            groups.append([b])
+    return groups
+
+
+def _midpoint_bounds(centers: list[float], lo: float, hi: float) -> list[float]:
+    """Cell boundaries midway between consecutive cluster centres."""
+    return [lo] + [(a + b) / 2 for a, b in zip(centers, centers[1:])] + [hi]
+
+
 def propose_regions(prim: PagePrimitives, min_panel_area: float = 2000.0) -> list[Region]:
     regions: list[Region] = []
 
@@ -1440,8 +1540,14 @@ def propose_regions(prim: PagePrimitives, min_panel_area: float = 2000.0) -> lis
     for f in panels:
         regions.append(Region(bbox=f.bbox, kind="panel", fill_color=f.color))
 
+    chip_boxes = [f.bbox for f in prim.fills if f.is_chip]
+    grid_tables, gridded = _chip_grid_tables(chip_boxes)
+    for gt in grid_tables:
+        if not any(containment(gt.bbox, t.bbox) > 0.3 or containment(t.bbox, gt.bbox) > 0.3
+                   for t in tables):
+            regions.append(gt)
     for f in prim.fills:
-        if f.is_chip:
+        if f.is_chip and f.bbox not in gridded:
             regions.append(Region(bbox=f.bbox, kind="chip", fill_color=f.color))
 
     for cluster in _cluster_images(prim.images):
