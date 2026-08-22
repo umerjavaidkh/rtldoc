@@ -15,8 +15,10 @@ and vector tables.
   presentation-form and lam-alef bugs that silently corrupt ~⅓ of Arabic words
   in every general parser — encoding bugs no layout model can fine-tune away.
 - **Tables without a model.** Reads table structure from the PDF's own vector
-  rules at 100% (vs ~85–95% from a CNN), and recovers *borderless* tables by
-  column alignment.
+  rules at 100% (vs ~85–95% from a CNN), recovers *borderless* tables by
+  column alignment, and recovers grids drawn as plain filled boxes — the way
+  papers and Word exports often draw a table with no rules at all — from the
+  regularity of the boxes themselves.
 - **Deterministic & auditable.** Every output traces to a rule you can point
   at. CPU-only, **6–60 pages/sec**, $0/page — a VLM is 100–1000× the cost and
   can't be audited.
@@ -68,7 +70,7 @@ import in Python, are both still `rtldoc`.)
 Or install straight from a specific release without going through PyPI:
 
 ```bash
-pip install "git+https://github.com/umerjavaidkh/rtldoc.git@v1.0.7"
+pip install "git+https://github.com/umerjavaidkh/rtldoc.git@v1.1.0"
 ```
 
 Then:
