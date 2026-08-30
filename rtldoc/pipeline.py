@@ -198,7 +198,49 @@ def _dominant_style(region: Region) -> str | None:
     return max(tally, key=tally.get)
 
 
-def _fallback_role(region: Region, page: PagePrimitives) -> str:
+_SENTENCE_BREAK = re.compile(r"[.;:!?]\s+[A-Z(]")
+
+
+def _heading_shaped(region: Region, text: str = "", max_chars: int = 200,
+                    max_lines: int = 3) -> bool:
+    """Is this region SHAPED like a heading, independent of its font size?
+
+    Relative font size alone decides nothing on its own. It is measured
+    against the page's median glyph size, and on a page carrying a lot of
+    small text -- figure labels, axis ticks, equation subscripts, a dense
+    table -- that median is dragged well below the real body size, so
+    ordinary body paragraphs clear the "bigger than body" bar and get typed
+    as headings. Measured on a 40-document arXiv sample: 44% of everything
+    called a heading was unusable, two thirds of those simply because a body
+    paragraph had been mislabelled, with the longest "heading" running 3,171
+    characters -- several paragraphs of prose.
+
+    A heading is a short label: a line or two, not running prose. Length and
+    line count are what actually separate the two, and they need no font
+    information at all, so they hold even where the size signal has been
+    poisoned. The bounds are deliberately generous -- a long paper title
+    (~120 chars) still passes -- because the failure being cut off is
+    hundreds of characters past them, not near them.
+    """
+    # Prefer the RENDERED text: a region's final text usually comes from the
+    # reconstructed geometric lines, not its raw spans, so measuring spans
+    # alone misses blocks whose rendered content is far longer than the
+    # spans they happen to own (an 1,818-character "heading" survived the
+    # span-only check for exactly this reason).
+    text = (text or " ".join(s.text for s in region.spans)).strip()
+    if not text:
+        return True
+    if len(text) > max_chars:
+        return False
+    if len(_SENTENCE_BREAK.findall(text)) >= 2:
+        return False
+    if text.count(chr(10)) + 1 > max_lines:
+        return False
+    lines = group_by_line(region.spans) if region.spans else []
+    return len(lines) <= max_lines
+
+
+def _fallback_role(region: Region, page: PagePrimitives, text: str = "") -> str:
     if region.kind == "table":
         return "table"
     if region.kind == "figure":
@@ -214,8 +256,8 @@ def _fallback_role(region: Region, page: PagePrimitives) -> str:
     dominant = statistics.median(weighted)
     body = sorted(s.size for s in page.spans)[len(page.spans) // 2] if page.spans else 10
     if region.kind == "panel":
-        return "heading" if dominant > body * 1.25 else "passage"
-    if dominant > body * 1.35:
+        return "heading" if dominant > body * 1.25 and _heading_shaped(region, text) else "passage"
+    if dominant > body * 1.35 and _heading_shaped(region, text):
         return "heading"
     if len(region.spans) <= 2 and (region.bbox[3] > page.height * 0.93):
         return "page_furniture"
@@ -280,6 +322,27 @@ def _dedupe_blocks(blocks: list["Block"], quality: dict[int, int], min_len: int 
             continue
         kept = [ln for li, ln in enumerate(lines) if (bi, li) not in remove]
         blocks[bi].text = "\n".join(kept).strip()
+
+
+def _nearest_caption_block(fig: "Block", blocks: list["Block"]):
+    """Nearest caption CANDIDATE for a figure, as (block, distance).
+
+    Split out from _nearest_caption so the caller can resolve competition
+    between figures for the same caption -- see parse_page, where only the
+    closest figure keeps it."""
+    fx = (fig.bbox[0] + fig.bbox[2]) / 2
+    fy = (fig.bbox[1] + fig.bbox[3]) / 2
+    best, best_d = None, None
+    for b in blocks:
+        if b is fig or b.role in ("figure", "table", "passage") or not b.text.strip():
+            continue
+        bx, by = (b.bbox[0] + b.bbox[2]) / 2, (b.bbox[1] + b.bbox[3]) / 2
+        d = ((fx - bx) ** 2 + (fy - by) ** 2) ** 0.5
+        if b.column != fig.column:
+            d *= 3
+        if best is None or d < best_d:
+            best, best_d = b, d
+    return best, (best_d if best_d is not None else 0.0)
 
 
 def _nearest_caption(fig: "Block", blocks: list["Block"], max_chars: int = 120) -> str:
@@ -507,7 +570,7 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
             text, diag = _region_text(r, opts)
             q = 1
         style = _dominant_style(r)
-        role = style_map.get(style or "", None) or _fallback_role(r, prim)
+        role = style_map.get(style or "", None) or _fallback_role(r, prim, text)
         if role == "activity_marker" and not text:
             continue
         block = Block(role=role, text=text, bbox=tuple(round(v, 1) for v in r.bbox),
@@ -531,9 +594,32 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     # A figure has no text of its own -- geometrically attach the nearest
     # other block's text as a caption, so a photo or chart isn't rendered
     # with nothing to say what it is. Purely positional: no model call.
+    #
+    # Each caption is claimed by AT MOST ONE figure, the nearest. A single
+    # illustration is captioned once in the source, so handing the same
+    # text to every figure that happens to sit near it does not describe
+    # them -- it just emits that caption N times. It goes badly wrong on a
+    # full-page diagram built from many small icons: confirmed real case,
+    # an architecture figure assembled from ~15 icon images gave all of
+    # them the one "Figure 1: ..." caption, duplicating it 15 times over
+    # and making that page the worst duplicated-text page in the document
+    # (letter excess 0.378). Figures that lose the contest simply carry no
+    # caption, which is the honest answer -- an icon inside a larger
+    # diagram has no caption of its own.
+    claimed: dict[int, tuple[float, "Block"]] = {}
     for b in result.blocks:
-        if b.role == "figure":
-            b.text = _nearest_caption(b, result.blocks)
+        if b.role != "figure":
+            continue
+        src, dist = _nearest_caption_block(b, result.blocks)
+        b.text = ""
+        if src is None:
+            continue
+        prev = claimed.get(id(src))
+        if prev is None or dist < prev[0]:
+            if prev is not None:
+                prev[1].text = ""
+            claimed[id(src)] = (dist, b)
+            b.text = src.text.strip().replace("\n", " ")[:120]
 
     for b in result.blocks:
         if b.activity is None:
