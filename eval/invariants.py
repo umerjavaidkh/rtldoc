@@ -43,7 +43,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import fitz  # noqa: E402
-from rtldoc import pipeline  # noqa: E402
+from rtldoc import arabic, pipeline  # noqa: E402
 
 _PRESENTATION = re.compile(r"[ﭐ-﷿ﹰ-﻿]")
 
@@ -106,7 +106,14 @@ def check_pdf(path: str, determinism_sample: int = 5) -> dict:
 
         out = "\n".join(b.text for b in r.blocks)
 
-        if _PRESENTATION.search(out):                       # HARD: deshaping
+        # HARD: deshaping. Block membership alone over-reports -- the ornate
+        # parentheses U+FD3E/U+FD3F sit in the presentation block but are
+        # ordinary characters with no decomposition, so correctly preserving
+        # them is not a leak (confirmed real case: an Arabic Wikipedia article
+        # quoting Qur'anic verses, whose verse quotation marks tripped this).
+        # arabic.is_presentation_form applies the real test: does the
+        # character actually decompose to something deshaping would produce?
+        if any(arabic.is_presentation_form(c) for c in out):
             report["presentation_forms"].append(i + 1)
 
         for b in r.blocks:                                  # HARD: rectangular tables

@@ -24,6 +24,29 @@ from dataclasses import dataclass
 # --------------------------------------------------------------------------
 
 PRESENTATION_RANGES = ((0xFB50, 0xFDFF), (0xFE70, 0xFEFF))
+# Not every codepoint in those blocks is a presentation form of a letter.
+# The ornate parentheses U+FD3E/U+FD3F -- used to quote Qur'anic verses, and
+# genuinely common in Arabic educational and religious text -- sit inside the
+# range but are ordinary characters that must survive verbatim: they have no
+# decomposition to deshape TO. A real presentation form always carries a
+# compatibility decomposition (e.g. U+FEFB -> "<isolated> 0644 0627"), so
+# that, not block membership, is what actually identifies one. Confirmed real
+# case: an Arabic Wikipedia article quoting Qur'anic verses tripped the
+# "presentation forms leaked into output" HARD invariant purely on its
+# quotation marks, which the parser had correctly preserved.
+NON_DECOMPOSING_IN_RANGE = frozenset("﴾﴿")
+
+
+def is_presentation_form(ch: str) -> bool:
+    """True only for a character that is a presentation form OF something --
+    i.e. one that deshaping can actually rewrite. See the note above on why
+    block membership alone is the wrong test."""
+    cp = ord(ch)
+    if not any(lo <= cp <= hi for lo, hi in PRESENTATION_RANGES):
+        return False
+    return ch not in NON_DECOMPOSING_IN_RANGE and bool(unicodedata.decomposition(ch))
+
+
 ARABIC_BLOCK = re.compile(r"[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]")
 HARAKAT = re.compile(r"[\u064B-\u0652\u0670\u0640]")   # incl. tatweel
 TATWEEL = "\u0640"
@@ -171,7 +194,7 @@ def normalize(text: str, opts: NormalizeOptions | None = None) -> tuple[str, dic
     diag = {"had_presentation_forms": False, "was_reversed": False}
     text = text.translate(INVISIBLES)
 
-    has_pf = any(any(lo <= ord(c) <= hi for lo, hi in PRESENTATION_RANGES) for c in text)
+    has_pf = any(is_presentation_form(c) for c in text)
     diag["had_presentation_forms"] = has_pf
 
     # ORDER MATTERS. Reverse BEFORE deshaping.
