@@ -229,8 +229,20 @@ def _heading_shaped(region: Region, text: str = "", max_chars: int = 200,
     # spans they happen to own (an 1,818-character "heading" survived the
     # span-only check for exactly this reason).
     text = (text or " ".join(s.text for s in region.spans)).strip()
+    # An empty region is not a heading -- it names nothing. These come from
+    # thin rule/graphic regions that carry no text at all.
     if not text:
-        return True
+        return False
+    # A heading starts a new thought, so it does not open mid-sentence. A
+    # block whose first character is a lower-case letter is a continuation
+    # line lifted out of a paragraph ("research on state-of-the-art
+    # self-driving systems, cannot be"), which is short and single-line and
+    # so passes every other test here. This was the single biggest remaining
+    # failure mode corpus-wide: 1,442 of 1,829 unusable headings across
+    # 1,462 documents. Case-aware by construction -- Arabic and other
+    # uncased scripts report islower() False, so their headings still pass.
+    if text[0].islower():
+        return False
     if len(text) > max_chars:
         return False
     if len(_SENTENCE_BREAK.findall(text)) >= 2:
@@ -603,6 +615,16 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     # genuine), so faithful source duplication survives while parser-side
     # double-emission does not.
     _dedupe_blocks(result.blocks, quality)
+
+    # Dedupe can empty a block outright, when every line it held was a
+    # duplicate owned better by an overlapping block. What is left is a
+    # textless block that still carries a role -- and an empty 'heading'
+    # fabricates a structure boundary out of nothing, which downstream
+    # retrieval then trusts (139 of the 208 unusable headings left in a
+    # 1,462-document sweep were exactly this). Figures and tables are kept
+    # regardless: their payload is an image or a cell grid, not text.
+    result.blocks = [b for b in result.blocks
+                     if b.text.strip() or b.role in ("figure", "table")]
 
     # A figure has no text of its own -- geometrically attach the nearest
     # other block's text as a caption, so a photo or chart isn't rendered
