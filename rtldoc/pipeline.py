@@ -247,6 +247,10 @@ def _fallback_role(region: Region, page: PagePrimitives, text: str = "") -> str:
         return "figure"
     if region.kind == "chip":
         return "activity_marker"
+    # 90-degree rotated text is a margin stamp / watermark / side tab, never
+    # body content and never a heading -- see the note in assign_spans.
+    if region.kind == "rotated":
+        return "page_furniture"
     # Dominant size (char-weighted median), not the single biggest span: a
     # region that's mostly body paragraph text with one bigger banner/label
     # span inside it (a "Learning Objectives" title over its own bullet list,

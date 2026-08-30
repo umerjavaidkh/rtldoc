@@ -65,7 +65,7 @@ def _evidence_score(signals: dict[str, float], weights: dict[str, float]) -> flo
     signals actually fed in."""
     return sum(weights[k] * signals[k] for k in weights)
 
-RegionKind = Literal["panel", "chip", "figure", "flow", "rule", "table"]
+RegionKind = Literal["panel", "chip", "figure", "flow", "rule", "table", "rotated"]
 
 
 @dataclass
@@ -1964,6 +1964,26 @@ def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.
     # recovers the gutter the surrounding paragraphs actually have). A
     # table's own internal cell layout has nothing to say about whether
     # the PROSE around it is 1- or 2-column.
+    # Text rotated 90 degrees is never part of the body reading flow -- on a
+    # paper it is the publisher's margin stamp ("arXiv:2608.03477v1 [cs.DB]
+    # 4 Aug 2026"), on a report a watermark or a side tab. It has to be kept
+    # out of the horizontal flow clustering for two separate reasons. Its
+    # bbox is a tall narrow strip spanning most of the page height, so it
+    # both distorts gutter detection and, being vertically adjacent to
+    # everything, merges into whichever body block it happens to touch --
+    # confirmed real cases: a stamp swallowed into the document's own
+    # "Contents" heading, and into a title, producing headings like
+    # "arXiv:2608.03477v1 [cs.DB] 4 Aug 2026 Contents". Clustered on their
+    # own they stay a separate region, which _fallback_role then types as
+    # page furniture.
+    rotated_orphans = [s for s in orphans if abs(s.dir[1]) > abs(s.dir[0])]
+    if rotated_orphans:
+        rot = set(map(id, rotated_orphans))
+        orphans = [s for s in orphans if id(s) not in rot]
+        for r in _cluster_flow(rotated_orphans):
+            r.kind = "rotated"
+            regions.append(r)
+
     boundaries = _column_boundaries([s.bbox for s in orphans], prim.width, prim.height)
     by_col: dict[int, list[Span]] = {}
     for s in orphans:
