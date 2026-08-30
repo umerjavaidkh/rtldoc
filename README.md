@@ -70,7 +70,7 @@ import in Python, are both still `rtldoc`.)
 Or install straight from a specific release without going through PyPI:
 
 ```bash
-pip install "git+https://github.com/umerjavaidkh/rtldoc.git@v1.2.0"
+pip install "git+https://github.com/umerjavaidkh/rtldoc.git@v1.2.1"
 ```
 
 Then:
