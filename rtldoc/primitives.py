@@ -478,6 +478,41 @@ def dedupe_duplicate_blocks(raw: dict, iou_thresh: float = 0.5, sim_thresh: floa
     return out
 
 
+_ALEF_VARIANTS = frozenset("\u0627\u0623\u0625\u0622")   # ا أ إ آ
+_LAM = "\u0644"
+
+
+def _chars_to_text_fixing_lam_alef(chars: list) -> str:
+    """Join a span's characters, repairing a lam-alef ligature that the
+    producer emitted in visual order.
+
+    Same repair, and the same geometric signal, as geobidi._fix_lam_alef_order
+    -- see that docstring for the measurements. It has to exist in both
+    places because the two build their text independently from the same
+    rawdict: geobidi rebuilds from glyph positions, this rebuilds the span
+    string, and a block renders through whichever path owns it. Fixing only
+    the glyph path left 289 corrupted pairs in the block output of a
+    143-page Arabic guide, all of them from blocks that fell back to the
+    span string.
+    """
+    out = []
+    i = 0
+    n = len(chars)
+    while i < n:
+        c = chars[i]
+        ch = c.get("c", "")
+        if i + 1 < n and ch in _ALEF_VARIANTS and chars[i + 1].get("c", "") == _LAM:
+            ab, bb = c["bbox"], chars[i + 1]["bbox"]
+            if (ab[2] - ab[0]) < 0.5 and (bb[2] - bb[0]) > (ab[3] - ab[1]) * 0.25:
+                out.append(chars[i + 1].get("c", ""))
+                out.append(ch)
+                i += 2
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def extract_page(page: "fitz.Page", drop_white_fills: bool = True,
                  drop_full_page_frac: float = 0.6, raw: dict | None = None) -> PagePrimitives:
     prim = PagePrimitives(
@@ -494,7 +529,7 @@ def extract_page(page: "fitz.Page", drop_white_fills: bool = True,
         for line in block["lines"]:
             for span in line["spans"]:
                 # rawdict carries chars, not a joined "text" -- rebuild it.
-                text = "".join(ch["c"] for ch in span.get("chars", []))
+                text = _chars_to_text_fixing_lam_alef(span.get("chars", []))
                 if not text.strip():
                     continue
                 # A zero-width span containing only Arabic diacritics

@@ -122,6 +122,49 @@ def glyphs_from_page(page: "fitz.Page", clip: tuple | None = None,
     return out
 
 
+def _drop_shadow_glyphs(glyphs: list["Glyph"]) -> list["Glyph"]:
+    """Remove a duplicated text layer drawn as a drop shadow / double strike.
+
+    Some producers fake a bold or shadowed heading by drawing the same run
+    twice, offset by a fraction of the font size. Both copies land inside
+    group_baselines' y tolerance (0.45 x font size), so they merge into one
+    baseline and, once sorted by x, interleave character by character:
+    "من المحكي" comes out "ممننااللممححككيي". Confirmed real case: an Arabic
+    teacher's guide whose section headings are all set this way -- offset
+    measured at dx 0.23pt, dy 1.05pt on a 12.8pt font.
+
+    A duplicate is the SAME character occupying essentially the SAME box:
+    x-overlap above 60% of the narrower glyph, and a y difference under a
+    quarter of the font size. That is far tighter than real adjacent text --
+    a genuine doubled letter (Arabic "اللغة" has two real lams) sits at
+    clearly separate x positions and is untouched.
+    """
+    if not glyphs:
+        return []
+    order = sorted(range(len(glyphs)), key=lambda i: (glyphs[i].x0, glyphs[i].y))
+    drop = set()
+    for k, i in enumerate(order):
+        if i in drop:
+            continue
+        a = glyphs[i]
+        wa = a.x1 - a.x0
+        if wa <= 0 or not a.c.strip():
+            continue
+        for j in order[k + 1:]:
+            b = glyphs[j]
+            if b.x0 - a.x0 > wa:
+                break
+            if j in drop or b.c != a.c:
+                continue
+            wb = b.x1 - b.x0
+            if wb <= 0:
+                continue
+            ov = min(a.x1, b.x1) - max(a.x0, b.x0)
+            if ov > 0.6 * min(wa, wb) and abs(a.y - b.y) < max(a.size, b.size) * 0.25:
+                drop.add(j)
+    return [g for i, g in enumerate(glyphs) if i not in drop]
+
+
 def _group_rotated(glyphs: list[Glyph], tol_frac: float = 0.45) -> list[list[Glyph]]:
     """Group 90-degree-rotated glyphs into their own lines.
 
@@ -184,6 +227,7 @@ def group_baselines(glyphs: list[Glyph], tol_frac: float = 0.45,
     """
     if not glyphs:
         return []
+    glyphs = _drop_shadow_glyphs(glyphs)
 
     # Rotated (90-degree) text has to be grouped on its OWN axis. Every step
     # here reasons in page coordinates and assumes horizontal text: a line is
@@ -294,11 +338,61 @@ def _resolve_runs(line: list[Glyph]) -> list[Glyph]:
     return out
 
 
+_ALEF_VARIANTS = frozenset("\u0627\u0623\u0625\u0622")   # ا أ إ آ
+_LAM = "\u0644"
+
+
+def _fix_lam_alef_order(ordered: list["Glyph"]) -> list["Glyph"]:
+    """Repair a lam-alef ligature emitted in visual order.
+
+    When a PDF draws the lam-alef ligature (لا) it emits ONE glyph carrying
+    both letters, but its ToUnicode map still yields two codepoints. Some
+    producers emit those two in the order they appear on the page -- alef
+    first, then lam -- which is the reverse of logical order, so every word
+    containing lam-alef is silently corrupted: الاصطناعي becomes االصطناعي,
+    الأول becomes األ...
+
+    arabic.normalize already guards the case where the ligature survives as
+    a single presentation-form codepoint (U+FEFB), by reordering before
+    deshaping. It cannot help here: these arrive already split into two
+    ordinary base letters, with no presentation form anywhere on the page.
+
+    The signal is geometric, not linguistic, which is what makes it safe.
+    The ligature's alef is emitted with ZERO advance width -- it is not
+    drawn, the lam glyph already contains it -- and that lam is drawn at
+    roughly double a normal lam's width because it carries both letters.
+    Measured over a 143-page Arabic teacher's guide:
+
+        zero-width alef followed by lam : 4218   <- the corruption
+        zero-width alef followed by other:   6
+        normal-width alef followed by lam: 16897 <- ordinary "ال" article,
+                                                    left untouched
+        lam width after zero-width alef  : 6.08 (median)
+        lam width after normal alef      : 3.05 (median)
+
+    So the ordinary definite article -- which is a genuine alef-then-lam and
+    must NOT be touched -- is separated from the corruption by a property of
+    the glyphs themselves, not by guessing at the word. Purely textual rules
+    cannot do this: قال is a legitimate alef-before-lam too.
+    """
+    out = list(ordered)
+    i = 0
+    while i < len(out) - 1:
+        a, b = out[i], out[i + 1]
+        if (a.c in _ALEF_VARIANTS and (a.x1 - a.x0) < 0.5
+                and b.c == _LAM and (b.x1 - b.x0) > max(a.size, b.size) * 0.4):
+            out[i], out[i + 1] = b, a
+            i += 2
+            continue
+        i += 1
+    return out
+
+
 def line_to_text(line: list[Glyph], space_frac: float = 0.20) -> str:
     """Emit a logical-order string, inserting spaces from measured gaps."""
     if not line:
         return ""
-    ordered = _resolve_runs(line)
+    ordered = _fix_lam_alef_order(_resolve_runs(line))
     parts: list[str] = []
     prev: Glyph | None = None
     for g in ordered:
