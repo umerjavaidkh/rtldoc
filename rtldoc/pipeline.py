@@ -199,6 +199,7 @@ def _dominant_style(region: Region) -> str | None:
 
 
 _SENTENCE_BREAK = re.compile(r"[.;:!?]\s+[A-Z(]")
+_WORDLIKE = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
 
 
 def _heading_shaped(region: Region, text: str = "", max_chars: int = 200,
@@ -233,6 +234,14 @@ def _heading_shaped(region: Region, text: str = "", max_chars: int = 200,
     if len(text) > max_chars:
         return False
     if len(_SENTENCE_BREAK.findall(text)) >= 2:
+        return False
+    # A heading names something, so it contains at least one actual word.
+    # Text with no run of two or more letters is a figure sub-label ("(a)
+    # (b)"), a bare number ("2 2", "12"), or an equation fragment -- all of
+    # which were being promoted to headings off a large-font subscript or
+    # axis label. Deliberately script-agnostic (str.isalpha, not A-Za-z):
+    # an Arabic or Greek heading has no Latin letters and must still pass.
+    if not _WORDLIKE.search(text):
         return False
     if text.count(chr(10)) + 1 > max_lines:
         return False
