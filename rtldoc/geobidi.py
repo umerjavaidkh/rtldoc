@@ -69,6 +69,15 @@ class Glyph:
     x1: float
     y: float
     size: float
+    # Writing direction of the line this glyph came from, as PyMuPDF reports
+    # it: (1, 0) for ordinary horizontal text, (0, -1) / (0, 1) for text
+    # rotated 90 degrees. Needed because every step below reasons in page
+    # coordinates and silently assumes horizontal text.
+    dir: tuple = (1.0, 0.0)
+
+    @property
+    def rotated(self) -> bool:
+        return abs(self.dir[1]) > abs(self.dir[0])
 
     @property
     def xc(self) -> float:
@@ -89,6 +98,7 @@ def glyphs_from_page(page: "fitz.Page", clip: tuple | None = None,
         if block.get("type") != 0:
             continue
         for line in block["lines"]:
+            ldir = tuple(line.get("dir", (1.0, 0.0)))
             for span in line["spans"]:
                 size = span["size"]
                 for ch in span.get("chars", []):
@@ -108,7 +118,32 @@ def glyphs_from_page(page: "fitz.Page", clip: tuple | None = None,
                     if not ch["c"].strip() and (b[2] - b[0]) < 0.1:
                         continue
                     out.append(Glyph(c=ch["c"], x0=b[0], x1=b[2],
-                                     y=(b[1] + b[3]) / 2, size=size))
+                                     y=(b[1] + b[3]) / 2, size=size, dir=ldir))
+    return out
+
+
+def _group_rotated(glyphs: list[Glyph], tol_frac: float = 0.45) -> list[list[Glyph]]:
+    """Group 90-degree-rotated glyphs into their own lines.
+
+    Same idea as the horizontal case with the axes swapped: a rotated line's
+    glyphs share an x centre and advance along y. Order within the line
+    follows the writing direction -- dir (0, -1) reads bottom-to-top on the
+    page, (0, 1) top-to-bottom -- so the result comes out in reading order
+    rather than page order.
+    """
+    out: list[list[Glyph]] = []
+    for g in sorted(glyphs, key=lambda g: g.xc):
+        if out:
+            last = out[-1]
+            tol = max(min(max(m.size for m in last), g.size) * tol_frac, 1.0)
+            if abs(g.xc - sum(m.xc for m in last) / len(last)) <= tol:
+                last.append(g)
+                continue
+        out.append([g])
+    for col in out:
+        # dir[1] < 0 means the text runs up the page, so later glyphs sit at
+        # smaller y and reading order is descending y.
+        col.sort(key=lambda g: g.y, reverse=col[0].dir[1] < 0)
     return out
 
 
@@ -149,6 +184,28 @@ def group_baselines(glyphs: list[Glyph], tol_frac: float = 0.45,
     """
     if not glyphs:
         return []
+
+    # Rotated (90-degree) text has to be grouped on its OWN axis. Every step
+    # here reasons in page coordinates and assumes horizontal text: a line is
+    # glyphs sharing a y, ordered by x. For text turned on its side that is
+    # exactly wrong -- its glyphs share an x and advance down the y axis, so
+    # y-grouping makes every single glyph its own one-character "line", and
+    # those then interleave with whatever real horizontal lines occupy the
+    # same y band. Confirmed real case: the vertical "arXiv:1810.04805v2
+    # [cs.CL] 24 May 2019" stamp down the left margin of an arXiv paper --
+    # present on essentially every arXiv PDF -- shredded into single
+    # characters that wove themselves through the body text ("...ELMo
+    # (Peters / 2 / y / a / M / 4 / 2 / ]"). Grouping rotated glyphs by
+    # their shared x instead, and ordering them along y, reconstructs the
+    # stamp as the one line it actually is and keeps it out of the body.
+    rotated = [g for g in glyphs if g.rotated]
+    if rotated:
+        horizontal = [g for g in glyphs if not g.rotated]
+        out = group_baselines(horizontal, tol_frac, col_gap_mult) if horizontal else []
+        for col in _group_rotated(rotated, tol_frac):
+            out.append(col)
+        return out
+
     ordered = sorted(glyphs, key=lambda g: g.y)
     lines: list[list[Glyph]] = []
     line_y: list[float] = []
@@ -195,6 +252,12 @@ def _resolve_runs(line: list[Glyph]) -> list[Glyph]:
     mix, not just RTL documents, so the base direction is decided per line
     from what's actually on it, never assumed.
     """
+    # A rotated line was already put in reading order along its own axis by
+    # _group_rotated; every sort here is by x, which for a line running down
+    # the page is a near-constant and would scramble it back into an
+    # arbitrary order.
+    if line and line[0].rotated:
+        return line
     if not any(_class(g.c) == "R" for g in line):
         return sorted(line, key=lambda g: g.xc)
 
@@ -240,8 +303,14 @@ def line_to_text(line: list[Glyph], space_frac: float = 0.20) -> str:
     prev: Glyph | None = None
     for g in ordered:
         if prev is not None:
-            # gap in physical space between the two glyphs, whichever side
-            gap = max(g.x0 - prev.x1, prev.x0 - g.x1)
+            # gap in physical space between the two glyphs, whichever side.
+            # A rotated line advances along y, so its word gaps are there --
+            # measuring x would report ~0 for every pair and run the whole
+            # line together into one word.
+            if g.rotated:
+                gap = abs(g.y - prev.y) - max(prev.size, g.size) * 0.6
+            else:
+                gap = max(g.x0 - prev.x1, prev.x0 - g.x1)
             if gap > max(prev.size, g.size) * space_frac:
                 parts.append(" ")
         parts.append(g.c)
