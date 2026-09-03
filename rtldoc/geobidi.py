@@ -452,7 +452,18 @@ def line_to_text(line: list[Glyph], space_frac: float = 0.20) -> str:
     ordered = _fix_lam_alef_order(_resolve_runs(line))
     parts: list[str] = []
     prev: Glyph | None = None
-    for g in ordered:
+    prev_ink: Glyph | None = None      # last glyph that actually draws
+    for gi, g in enumerate(ordered):
+        # A space GLYPH that leaves no visual gap between the inked glyphs
+        # on either side is padding, not a word break: a combining mark is
+        # zero-width and drawn over its base letter, so the base letter's
+        # advance surfaces as a space inside one word ("القصّ ة"). Same ink
+        # test the span path applies to the same defect.
+        if g.c.isspace() and prev_ink is not None:
+            nxt = next((h for h in ordered[gi + 1:] if (h.x1 - h.x0) > 0.01), None)
+            if nxt is not None and not nxt.rotated and not g.rotated:
+                if max(nxt.x0 - prev_ink.x1, prev_ink.x0 - nxt.x1) < 0.5:
+                    continue
         if prev is not None:
             # gap in physical space between the two glyphs, whichever side.
             # A rotated line advances along y, so its word gaps are there --
@@ -461,11 +472,19 @@ def line_to_text(line: list[Glyph], space_frac: float = 0.20) -> str:
             if g.rotated:
                 gap = abs(g.y - prev.y) - max(prev.size, g.size) * 0.6
             else:
-                gap = max(g.x0 - prev.x1, prev.x0 - g.x1)
+                # Measure from the last glyph that draws ink. A combining
+                # mark is zero-width and sits ON its base letter, so
+                # measuring from the mark reports the base letter's own
+                # advance as a gap and splits one word in two ("القصّ ة"
+                # for "القصّة"). Same rule the span path uses.
+                ref = prev_ink if prev_ink is not None else prev
+                gap = max(g.x0 - ref.x1, ref.x0 - g.x1)
             if gap > max(prev.size, g.size) * space_frac:
                 parts.append(" ")
         parts.append(g.c)
         prev = g
+        if (g.x1 - g.x0) > 0.01:
+            prev_ink = g
     return "".join(parts)
 
 

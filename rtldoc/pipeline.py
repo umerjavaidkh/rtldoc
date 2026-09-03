@@ -215,8 +215,31 @@ def _table_grid(region: Region, owned: dict[int, list],
     ncols = max(c.table_col for c in region.cells) + 1
     grid = [["" for _ in range(ncols)] for _ in range(nrows)]
     diags = {"reversed_lines": 0, "presentation_forms": 0}
+    # Geo-line ownership is resolved per REGION, so a table's cells never
+    # had any and always fell back to the span path. That path joins a
+    # span's characters in stored order, and this producer stores them in
+    # visual left-to-right order -- so an RTL row's leading "10." marker,
+    # being rightmost, is stored last and surfaced in the middle of the
+    # sentence ("مستخدمًا اللغة10. العربيّة"). geobidi orders by position
+    # and gets it right. Hand each cell the region's lines that fall
+    # inside it; measured on the page above, 26 of 26 lines sit entirely
+    # within one cell, because the column rules split them already.
+    region_lines = owned.get(id(region), [])
+
+    def _lines_in(cell) -> list:
+        cx0, cy0, cx1, cy1 = cell.bbox
+        return [(bb, t) for bb, t in region_lines
+                if bb[0] >= cx0 - 2.0 and bb[2] <= cx1 + 2.0
+                and bb[1] >= cy0 - 2.0 and bb[3] <= cy1 + 2.0]
+
     for cell in region.cells:
+        # Scoped to RTL cells: this is a bidi ordering bug, and the span
+        # path is correct for LTR. Applied to every cell it re-rendered
+        # 13 of 23 golden fixtures (all Latin-script tables) -- a change
+        # that large is not a fix, it is a different renderer.
         cell_lines = owned.get(id(cell), [])
+        if not cell_lines and arabic.is_arabic("".join(sp.text for sp in (cell.spans or []))):
+            cell_lines = _lines_in(cell)
         if cell_lines:
             text, d = _region_text_geo(cell, cell_lines, opts)
             if not text and cell.spans:
