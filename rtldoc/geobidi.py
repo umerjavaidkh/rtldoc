@@ -318,6 +318,7 @@ def _resolve_runs(line: list[Glyph]) -> list[Glyph]:
         resolved[i] = "L" if prev == "L" and nxt == "L" else "R"
 
     out: list[Glyph] = []
+    mirrorable: list[int] = []
     i = 0
     while i < len(line):
         if resolved[i] == "L":
@@ -328,14 +329,60 @@ def _resolve_runs(line: list[Glyph]) -> list[Glyph]:
             i = j
         else:
             g = line[i]
-            # Unicode bidi rule L4: a mirrored glyph in an RTL run must be
-            # replaced by its pair. The PDF stored the visual shape; logical
-            # order needs the opposite one.
             if g.c in MIRROR_PAIRS:
-                g = Glyph(MIRROR_PAIRS[g.c], g.x0, g.x1, g.y, g.size)
+                mirrorable.append(len(out))
             out.append(g)
             i += 1
-    return out
+    return _mirror_if_it_helps(out, mirrorable)
+
+
+_OPENERS = "([{\u00ab"
+_CLOSERS = {")": "(", "]": "[", "}": "{", "\u00bb": "\u00ab"}
+
+
+def _bracket_score(chars) -> int:
+    """How many bracket pairs nest correctly, reading in logical order."""
+    stack, ok = [], 0
+    for c in chars:
+        if c in _OPENERS:
+            stack.append(c)
+        elif c in _CLOSERS and stack and stack[-1] == _CLOSERS[c]:
+            stack.pop()
+            ok += 1
+    return ok
+
+
+def _mirror_if_it_helps(out: list["Glyph"], mirrorable: list[int]) -> list["Glyph"]:
+    """Apply Unicode bidi rule L4 only when the producer actually needs it.
+
+    L4 says a mirrored character inside an RTL run must be swapped for its
+    pair, because the PDF stored the VISUAL shape and logical order needs the
+    opposite one. That is true of producers that mirror at render time -- but
+    plenty store the LOGICAL character already, and mirroring those corrupts
+    correct text. Applying L4 unconditionally turned a correctly stored
+    "(طه، 2018)." into ")طه، 2018 (." -- both brackets inverted (confirmed
+    real case, Arabic teacher's guide p8).
+
+    Which convention a file uses is decidable from the text itself, with no
+    producer sniffing: brackets have to nest. Score the line both ways and
+    keep the reading where more pairs close correctly; on a tie, leave the
+    stored characters alone, since inventing a swap is the riskier of the
+    two. Deliberately per line -- a single document can mix producers via
+    embedded or pasted content.
+    """
+    if not mirrorable:
+        return out
+    as_is = [g.c for g in out]
+    flipped = list(as_is)
+    for i in mirrorable:
+        flipped[i] = MIRROR_PAIRS[flipped[i]]
+    if _bracket_score(flipped) <= _bracket_score(as_is):
+        return out
+    swapped = list(out)
+    for i in mirrorable:
+        g = swapped[i]
+        swapped[i] = Glyph(MIRROR_PAIRS[g.c], g.x0, g.x1, g.y, g.size, g.dir)
+    return swapped
 
 
 _ALEF_VARIANTS = frozenset("\u0627\u0623\u0625\u0622")   # ا أ إ آ
@@ -381,7 +428,17 @@ def _fix_lam_alef_order(ordered: list["Glyph"]) -> list["Glyph"]:
         a, b = out[i], out[i + 1]
         if (a.c in _ALEF_VARIANTS and (a.x1 - a.x0) < 0.5
                 and b.c == _LAM and (b.x1 - b.x0) > max(a.size, b.size) * 0.4):
-            out[i], out[i + 1] = b, a
+            # Reposition the alef to the LEFT edge of the lam as well as
+            # reordering it. The ligature's alef is stored at the lam's RIGHT
+            # edge (it is a zero-width mark on a glyph that is drawn as one
+            # piece), so simply swapping the two leaves it sitting a whole
+            # lam-width away from the letter that follows -- and line_to_text
+            # measures word gaps from exactly that distance, so it inserted a
+            # space mid-word: "الأنواع" came out "الأ نواع". In the ligature
+            # the alef IS the left half, so the left edge is also its true
+            # position.
+            out[i] = b
+            out[i + 1] = Glyph(a.c, b.x0, b.x0, a.y, a.size, a.dir)
             i += 2
             continue
         i += 1
