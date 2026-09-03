@@ -220,7 +220,8 @@ def _split_regions_by_side(regions: list[Region], sides) -> list[list[Region]]:
 
 
 def _table_grid(region: Region, owned: dict[int, list],
-                opts: arabic.NormalizeOptions, fills=None) -> tuple[list[list[str]], dict]:
+                opts: arabic.NormalizeOptions, fills=None,
+                page=None) -> tuple[list[list[str]], dict]:
     """Build the raw (row, col) text grid for a detected table (see
     layout.detect_tables). Cell text goes through the same geometry-first
     bidi/repair path as everything else -- only the grid layout itself comes
@@ -242,6 +243,11 @@ def _table_grid(region: Region, owned: dict[int, list],
     # inside it; measured on the page above, 26 of 26 lines sit entirely
     # within one cell, because the column rules split them already.
     region_lines = owned.get(id(region), [])
+    # Clipping a rectangle cuts words in half, so the empty-cell rescue
+    # below is scoped to RTL tables. On a dense Latin table it filled
+    # deliberately-empty cells with fragments of the caption running past
+    # them ("deo depth", "ark resu") and broke a golden fixture.
+    _region_rtl = arabic.is_arabic("".join(sp.text for sp in (region.spans or [])))
 
     def _lines_in(cell) -> list:
         cx0, cy0, cx1, cy1 = cell.bbox
@@ -255,8 +261,23 @@ def _table_grid(region: Region, owned: dict[int, list],
         # 13 of 23 golden fixtures (all Latin-script tables) -- a change
         # that large is not a fix, it is a different renderer.
         cell_lines = owned.get(id(cell), [])
-        if not cell_lines and arabic.is_arabic("".join(sp.text for sp in (cell.spans or []))):
+        rtl_cell = arabic.is_arabic("".join(sp.text for sp in (cell.spans or [])))
+        if not cell_lines and rtl_cell:
             cell_lines = _lines_in(cell)
+        if (not cell_lines and not (cell.spans or []) and page is not None
+                and region_lines and _region_rtl):
+            # A narrow marker column can end up owning nothing: the row's
+            # single span reaches across the column boundary, so the whole
+            # line belongs to the content cell and the marker's own glyphs
+            # -- which do sit inside this cell -- are clipped away with it.
+            # Re-extract just this cell's rectangle so the marker is read
+            # from its own geometry (confirmed real case: p73, where rows
+            # 3 and 5 lost their ".3" and ".5" entirely).
+            try:
+                from . import geobidi
+                cell_lines = geobidi.page_lines(page, clip=cell.bbox)
+            except Exception:
+                cell_lines = []
         if cell_lines:
             text, d = _region_text_geo(cell, cell_lines, opts)
             if not text and cell.spans:
@@ -286,11 +307,11 @@ def _table_grid(region: Region, owned: dict[int, list],
 
 
 def _table_text(region: Region, owned: dict[int, list], opts: arabic.NormalizeOptions,
-                fills=None) -> tuple[str, dict, list]:
+                fills=None, page=None) -> tuple[str, dict, list]:
     """Render a detected table as a GFM markdown table. Returns (markdown,
     diagnostics, grid) -- the grid is exposed so to_html can build a real
     <table> instead of re-parsing markdown pipes back into cells."""
-    grid, diags = _table_grid(region, owned, opts, fills)
+    grid, diags = _table_grid(region, owned, opts, fills, page)
     if not grid:
         return "", diags, grid
     ncols = len(grid[0])
@@ -737,7 +758,7 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     for r in regions:
         grid = None
         if r.kind == "table":
-            text, diag, grid = _table_text(r, owned, opts, prim.fills)
+            text, diag, grid = _table_text(r, owned, opts, prim.fills, page)
             # A "table" with no text in any cell is never a real table -- it
             # is a false positive from stray rules (confirmed real case: a
             # flowchart's thin connector lines, classified as rule fills,
