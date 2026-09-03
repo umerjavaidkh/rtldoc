@@ -109,12 +109,28 @@ def _region_text_geo(region: Region, geo_lines, opts) -> tuple[str, dict]:
     picked.sort(key=lambda p: (round(p[0][1] / 3.0), -p[0][0] if rtl else p[0][0]))
     out, diags = [], {"reversed_lines": 0, "presentation_forms": 0}
     for _, raw in picked:
-        clean, d = arabic.normalize(raw, opts)
+        clean, d = arabic.normalize(_collapse_leaders(raw), opts)
         diags["presentation_forms"] += int(d["had_presentation_forms"])
         diags["reversed_lines"] += int(d["was_reversed"])
         if clean:
             out.append(clean)
     return "\n".join(out), diags
+
+
+_LEADER_RUN = re.compile(r"([.\u00b7\u2022\u2024\u2027_\u2500-\u257f])(?:[ \t]*\1){3,}")
+
+
+def _collapse_leaders(text: str) -> str:
+    """Collapse a run of leader characters to a single ellipsis.
+
+    A table of contents fills the space between a title and its page
+    number with dot leaders -- 596 of them on one page here. They carry no
+    meaning, and in a retrieval chunk they dilute the embedding and blow
+    the token budget for the row that actually matters. One "..." keeps
+    the visual sense of "title ... page" without the noise. Four or more
+    repeats, so real punctuation ("...", "--") is untouched.
+    """
+    return _LEADER_RUN.sub("...", text)
 
 
 def _region_text(region: Region, opts: arabic.NormalizeOptions) -> tuple[str, dict]:
@@ -153,7 +169,7 @@ def _region_text(region: Region, opts: arabic.NormalizeOptions) -> tuple[str, di
                         parts.append(" ")
                 parts.append(sp.text)
             raw = "".join(parts)
-        clean, d = arabic.normalize(raw, opts)
+        clean, d = arabic.normalize(_collapse_leaders(raw), opts)
         diags["reversed_lines"] += int(d["was_reversed"])
         diags["presentation_forms"] += int(d["had_presentation_forms"])
         if clean:

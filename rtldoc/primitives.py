@@ -356,6 +356,18 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
         for _code, glyph, origin, _bbox in span.get("chars", [])
         if (span.get("font", ""), glyph) in space_glyphs
     }
+    # Third disagreement class: rawdict cannot decode the glyph at all and
+    # emits U+FFFD, while get_texttrace() reads it correctly. Confirmed real
+    # case: a table of contents' leader dots (glyph 17) came through as 596
+    # replacement characters per page. Recover the character the drawn-glyph
+    # decoder already has.
+    undecoded = {
+        (span.get("font", ""), round(origin[0], 1), round(origin[1], 1)): chr(code)
+        for span in trace
+        for code, _glyph, origin, _bbox in span.get("chars", [])
+        if code and chr(code) != "\ufffd" and not chr(code).isspace()
+    }
+
     # The mirror repair: positions where a glyph that demonstrably draws ink
     # was decoded as whitespace. Those are characters the ToUnicode map
     # deleted outright -- every bullet in a list, in the confirmed case.
@@ -366,7 +378,7 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
         for code, glyph, origin, _bbox in span.get("chars", [])
         if (span.get("font", ""), glyph) in ink_glyphs and chr(code).isspace()
     }
-    if not bad_positions and not ink_positions:
+    if not bad_positions and not ink_positions and not undecoded:
         return raw
 
     for block in raw.get("blocks", []):
@@ -378,6 +390,11 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
                 for ch in span.get("chars", []):
                     o = ch.get("origin")
                     if o is None:
+                        continue
+                    if ch["c"] == "\ufffd":
+                        fixed = undecoded.get((font, round(o[0], 1), round(o[1], 1)))
+                        if fixed is not None:
+                            ch["c"] = fixed
                         continue
                     if ch["c"].isspace():
                         repl = ink_positions.get((font, round(o[0], 1), round(o[1], 1)))
