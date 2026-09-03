@@ -378,7 +378,8 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
         for code, glyph, origin, _bbox in span.get("chars", [])
         if (span.get("font", ""), glyph) in ink_glyphs and chr(code).isspace()
     }
-    # A position where the producer ALSO draws a real glyph is not a
+    # A position where the producer ALSO draws a real glyph FROM A
+    # DIFFERENT GLYPH ID is not a
     # corrupt-space position: the space glyph is an overlay (padding drawn
     # on top of the character), and the character is what the page shows.
     # Confirmed real case (p54): list markers "1." and "4." each carry a
@@ -386,7 +387,14 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
     # space deleted the marker outright, while "2." -- which has no such
     # overlay -- survived. The phantom-digit case this repair exists for is
     # unaffected: there the origin carries ONLY the space glyph.
-    bad_positions -= undecoded.keys()
+    overlay_positions = {
+        (span.get("font", ""), round(origin[0], 1), round(origin[1], 1))
+        for span in trace
+        for code, glyph, origin, _bbox in span.get("chars", [])
+        if code and not chr(code).isspace()
+        and (span.get("font", ""), glyph) not in space_glyphs
+    }
+    bad_positions -= overlay_positions
 
     if not bad_positions and not ink_positions and not undecoded:
         return raw
