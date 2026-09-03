@@ -173,6 +173,69 @@ _RAWDICT_FLAGS = fitz.TEXTFLAGS_RAWDICT | fitz.TEXT_PRESERVE_LIGATURES
 _SPACE_GLYPH_CACHE_ATTR = "_rtldoc_space_glyphs"
 
 
+_INK_GLYPH_CACHE_ATTR = "_rtldoc_ink_glyphs"
+
+
+def _document_ink_glyphs(doc: "fitz.Document") -> dict:
+    """{(font, glyph): true character} for glyphs the whitespace vote got
+    backwards -- they draw ink, so any occurrence read as whitespace is a
+    deleted character. Populated by _document_space_glyphs' single pass."""
+    cached = getattr(doc, _INK_GLYPH_CACHE_ATTR, None)
+    if cached is None:
+        _document_space_glyphs(doc)
+        cached = getattr(doc, _INK_GLYPH_CACHE_ATTR, {}) or {}
+    return cached
+
+
+def _glyph_has_ink(doc: "fitz.Document", sample: tuple | None) -> bool:
+    """Does this glyph actually draw something? Renders one occurrence.
+
+    The whitespace vote in _document_space_glyphs is a majority vote over
+    ToUnicode readings, and a majority can be the *corrupt* reading. Two
+    real cases in one document are statistically indistinguishable:
+
+        glyph   3 -> ' ' 96%, '1'  4%   ' ' is right; the digit is phantom
+        glyph 316 -> ' ' 66%, '•' 34%   '•' is right; every bullet was
+                                        being rewritten to a space
+
+    Both are "mostly space, consistent printable minority", so no threshold
+    on the tallies can separate them -- ToUnicode is simply unreliable for
+    the glyph in both directions. What settles it is whether the page draws
+    anything there, which is not an opinion.
+
+    Measured by contrast inside the glyph's own box, not darkness: a glyph
+    sitting on a colored band fills its box with a uniform dark color and
+    would read as "ink" on a darkness test. The box is narrowed to its
+    middle 60% so a neighbouring letter's ink can't bleed in. Confirmed
+    separation is categorical, not marginal -- spread 0 for every genuine
+    space glyph, 207-227 for the bullet.
+    """
+    if sample is None:
+        return False                      # untestable: keep the vote's answer
+    pno, bbox = sample
+    try:
+        page = doc[pno]
+        x0, y0, x1, y1 = bbox
+        w = x1 - x0
+        clip = fitz.Rect(x0 + w * 0.2, y0, x1 - w * 0.2, y1)
+        if clip.is_empty or clip.width <= 0 or clip.height <= 0:
+            return False
+        pix = page.get_pixmap(matrix=fitz.Matrix(8, 8), clip=clip)
+        buf, n = pix.samples, pix.n
+        if not buf:
+            return False
+        lo = hi = buf[0]
+        for i in range(0, len(buf), n):
+            v = buf[i]
+            if v < lo:
+                lo = v
+            elif v > hi:
+                hi = v
+        return (hi - lo) > 40
+    except Exception:
+        return False
+
+
 def _document_space_glyphs(doc: "fitz.Document", min_samples: int = 5,
                             space_frac_thresh: float = 0.6) -> frozenset:
     """Which (font, glyph-id) pairs are, by consensus, a whitespace glyph --
@@ -199,6 +262,8 @@ def _document_space_glyphs(doc: "fitz.Document", min_samples: int = 5,
         return cached
 
     tallies: dict[tuple[str, int], list[int]] = {}
+    samples: dict[tuple[str, int], tuple[int, tuple]] = {}
+    printable: dict[tuple[str, int], dict[int, int]] = {}
     for page in doc:
         try:
             trace = page.get_texttrace()
@@ -206,17 +271,33 @@ def _document_space_glyphs(doc: "fitz.Document", min_samples: int = 5,
             continue
         for span in trace:
             font = span.get("font", "")
-            for code, glyph, _origin, _bbox in span.get("chars", []):
+            for code, glyph, _origin, bbox in span.get("chars", []):
                 key = (font, glyph)
                 t = tallies.setdefault(key, [0, 0])
                 t[1] += 1
                 if chr(code).isspace():
                     t[0] += 1
+                if key not in samples and (bbox[2] - bbox[0]) > 0.3:
+                    samples[key] = (page.number, tuple(bbox))
+                if not chr(code).isspace():
+                    printable.setdefault(key, {})
+                    printable[key][code] = printable[key].get(code, 0) + 1
 
-    space_glyphs = frozenset(
-        k for k, (sp, tot) in tallies.items()
-        if tot >= min_samples and sp / tot >= space_frac_thresh
-    )
+    voted = [k for k, (sp, tot) in tallies.items()
+             if tot >= min_samples and sp / tot >= space_frac_thresh]
+    space_glyphs = frozenset(k for k in voted if not _glyph_has_ink(doc, samples.get(k)))
+    # A voted-space glyph that DOES draw ink is the opposite defect: the
+    # majority reading is the corrupt one, and every occurrence decoded as
+    # whitespace is a printable character that was silently deleted. Its
+    # true character is the one the minority readings agree on.
+    overrides: dict[tuple[str, int], str] = {}
+    for k in voted:
+        if k in space_glyphs or k not in printable:
+            continue
+        code, n = max(printable[k].items(), key=lambda kv: kv[1])
+        if n >= min_samples:
+            overrides[k] = chr(code)
+    setattr(doc, _INK_GLYPH_CACHE_ATTR, overrides)
     setattr(doc, _SPACE_GLYPH_CACHE_ATTR, space_glyphs)
     return space_glyphs
 
@@ -262,7 +343,8 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
         if doc is None:
             raise ValueError
         space_glyphs = _document_space_glyphs(doc)
-        if not space_glyphs:
+        ink_glyphs = _document_ink_glyphs(doc)
+        if not space_glyphs and not ink_glyphs:
             return raw
         trace = page.get_texttrace()
     except Exception:
@@ -274,7 +356,17 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
         for _code, glyph, origin, _bbox in span.get("chars", [])
         if (span.get("font", ""), glyph) in space_glyphs
     }
-    if not bad_positions:
+    # The mirror repair: positions where a glyph that demonstrably draws ink
+    # was decoded as whitespace. Those are characters the ToUnicode map
+    # deleted outright -- every bullet in a list, in the confirmed case.
+    ink_positions = {
+        (span.get("font", ""), round(origin[0], 1), round(origin[1], 1)):
+            ink_glyphs[(span.get("font", ""), glyph)]
+        for span in trace
+        for code, glyph, origin, _bbox in span.get("chars", [])
+        if (span.get("font", ""), glyph) in ink_glyphs and chr(code).isspace()
+    }
+    if not bad_positions and not ink_positions:
         return raw
 
     for block in raw.get("blocks", []):
@@ -288,6 +380,10 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
                     if o is None:
                         continue
                     if ch["c"].isspace():
+                        repl = ink_positions.get((font, round(o[0], 1), round(o[1], 1)))
+                        if repl is not None:
+                            ch["c"] = repl
+                            continue
                         # Already whitespace, so nothing is corrupt here --
                         # and it may be a *specific* typographic space the
                         # document means (U+2009 thin space between math
