@@ -211,11 +211,66 @@ def detect_tables(prim: PagePrimitives, min_rows: int = 2, min_cols: int = 2,
     all_rules = [f for f in prim.fills if f.is_rule]
     if not all_rules:
         return []
+    all_rules = all_rules + _synth_row_rules(prim, all_rules)
 
     tables: list[Region] = []
     for cluster in _cluster_rules(all_rules):
         tables.extend(_detect_table_in_cluster(cluster, min_rows, min_cols, coverage))
     return tables
+
+
+def _synth_row_rules(prim: PagePrimitives, all_rules: list["Fill"]) -> list["Fill"]:
+    """Horizontal rules a table draws only as breaks in its vertical ones.
+
+    A ruled grid needs both directions (_detect_table_in_cluster bails
+    without them), but a common publishing style draws ONLY the column
+    dividers and delimits rows with colored bands instead. The row
+    boundaries are still stated exactly: each column divider is emitted as
+    several collinear segments, and where one segment stops and the next
+    begins IS a row edge. A divider that is absent from one band is a
+    merged cell in that row -- so the segments carry the spans too.
+
+    Confirmed real case (Arabic teacher's guide p36, InDesign): three
+    dividers at x=201.3/360.0/518.7, each drawn in segments breaking at
+    y=156.1/215.4/402.5, and only x=360.0 continuing on to y=445.0 --
+    which is precisely the 4-column table whose bottom row is two merged
+    cells. Zero horizontal rules on the page, so the grid was discarded
+    whole.
+
+    The outer left/right edge is not in the rules (the dividers are all
+    interior), so it comes from the colored band the dividers cross.
+    """
+    verts = [f for f in all_rules
+             if (f.bbox[3] - f.bbox[1]) > (f.bbox[2] - f.bbox[0])]
+    horiz = [f for f in all_rules
+             if (f.bbox[2] - f.bbox[0]) > (f.bbox[3] - f.bbox[1])]
+    if horiz or len(verts) < 2:
+        return []
+
+    xs = sorted({round(f.bbox[0], 1) for f in verts})
+    if len(xs) < 2:                       # need a real internal column split
+        return []
+    ys = sorted({round(v, 1) for f in verts for v in (f.bbox[1], f.bbox[3])})
+    if len(ys) < 3:                       # need >= 2 rows
+        return []
+
+    vx0, vx1 = min(xs), max(xs)
+    vy0, vy1 = ys[0], ys[-1]
+    # Outer extent: the widest band the dividers actually cross. Without one
+    # the dividers alone bound only the interior columns, losing the outer
+    # two entirely.
+    bands = [f for f in prim.fills
+             if not f.is_rule
+             and f.bbox[0] <= vx0 + 1.0 and f.bbox[2] >= vx1 - 1.0
+             and f.bbox[1] >= vy0 - 1.0 and f.bbox[3] <= vy1 + 1.0]
+    if not bands:
+        return []
+    x0 = min(f.bbox[0] for f in bands)
+    x1 = max(f.bbox[2] for f in bands)
+    if x1 - x0 <= 0:
+        return []
+    return [Fill(bbox=(x0, y, x1, y), color=(0.0, 0.0, 0.0),
+                 is_rule=True, is_stroke=True) for y in ys]
 
 
 def _detect_table_in_cluster(cluster: list[Fill], min_rows: int, min_cols: int,
