@@ -623,6 +623,42 @@ _ALEF_VARIANTS = frozenset("\u0627\u0623\u0625\u0622")   # ا أ إ آ
 _LAM = "\u0644"
 
 
+def _drop_padding_spaces(chars: list) -> list:
+    """Remove a space that leaves no visual gap between inked glyphs.
+
+    A combining mark (shadda, tashkeel) is emitted zero-width and drawn
+    over its base letter, so the base letter's own advance can surface as
+    a separate space character sitting between two letters of ONE word.
+    Extraction then reports "القصّ ة" for "القصّة" -- and a broken word
+    matches nothing in retrieval, which is worse than broken layout.
+
+    Width alone cannot decide it: the false space measured 4.09 and the
+    real word breaks on the same line measured 3.05, so a threshold puts
+    the corruption on the wrong side. Ink decides it. Measure from the
+    last glyph that actually draws to the next one: a real word break
+    leaves a gap there, padding leaves none. A word genuinely ending in a
+    shadda followed by a real space still shows that gap, so it is kept.
+    """
+    if len(chars) < 3:
+        return chars
+    out = []
+    for i, c in enumerate(chars):
+        if c["c"].isspace() and out:
+            prev_ink = None
+            for q in reversed(out):
+                if (q["bbox"][2] - q["bbox"][0]) > 0.01:
+                    prev_ink = q
+                    break
+            nxt = chars[i + 1] if i + 1 < len(chars) else None
+            if prev_ink is not None and nxt is not None and not nxt["c"].isspace():
+                gap = max(nxt["bbox"][0] - prev_ink["bbox"][2],
+                          prev_ink["bbox"][0] - nxt["bbox"][2])
+                if gap < 0.5:
+                    continue          # no visual gap -> padding, not a break
+        out.append(c)
+    return out
+
+
 def _chars_to_text_fixing_lam_alef(chars: list) -> str:
     """Join a span's characters, repairing a lam-alef ligature that the
     producer emitted in visual order.
@@ -636,6 +672,7 @@ def _chars_to_text_fixing_lam_alef(chars: list) -> str:
     143-page Arabic guide, all of them from blocks that fell back to the
     span string.
     """
+    chars = _drop_padding_spaces(chars)
     out = []
     i = 0
     n = len(chars)
