@@ -16,6 +16,8 @@ produce it because the linkage is cross-column and publisher-specific.
 
 from __future__ import annotations
 
+import dataclasses
+
 import json
 import re
 import statistics
@@ -200,6 +202,21 @@ def _marker_glyph(cell, fills) -> str:
         if x0 <= cx <= x1 and y0 <= cy <= y1:
             return "\u25cb"
     return ""
+
+
+def _split_regions_by_side(regions: list[Region], sides) -> list[list[Region]]:
+    """Partition regions back to the side of the page they were built from."""
+    out = []
+    for sp in sides:
+        keep = []
+        for r in regions:
+            cx = (r.bbox[0] + r.bbox[2]) / 2
+            cy = (r.bbox[1] + r.bbox[3]) / 2
+            if any(s.bbox[0] - 1 <= cx <= s.bbox[2] + 1 and s.bbox[1] - 1 <= cy <= s.bbox[3] + 1
+                   for s in sp.spans):
+                keep.append(r)
+        out.append(keep)
+    return out
 
 
 def _table_grid(region: Region, owned: dict[int, list],
@@ -548,8 +565,44 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     # page) gets the right direction either way.
     is_rtl_page = arabic.is_arabic("".join(s.text for s in prim.spans))
 
-    regions = propose_regions(prim)
-    regions = assign_spans(prim, regions)
+    # A page printed inside another page is two pages, so propose regions
+    # for each side independently. Grouping the finished regions is not
+    # enough: group_by_line pools spans across the whole page width, so a
+    # single block was being built from the inner page's heading AND the
+    # margin note beside it, and no ordering can unpick a block that
+    # already mixes both. Splitting the spans first is what actually keeps
+    # an exercise and its answer key out of the same retrieval chunk.
+    nested = nested_page_rect(prim)
+    if nested is not None:
+        nx0, ny0, nx1, ny1 = nested
+
+        def _inside(bbox) -> bool:
+            cx = (bbox[0] + bbox[2]) / 2
+            cy = (bbox[1] + bbox[3]) / 2
+            return nx0 <= cx <= nx1 and ny0 <= cy <= ny1
+
+        def _side(want_inside: bool) -> PagePrimitives:
+            return dataclasses.replace(
+                prim,
+                spans=[x for x in prim.spans if _inside(x.bbox) == want_inside],
+                fills=[x for x in prim.fills if _inside(x.bbox) == want_inside],
+                images=[x for x in prim.images if _inside(x.bbox) == want_inside],
+            )
+
+        _sides = [_side(True), _side(False)]
+        regions = [r for sp in _sides for r in propose_regions(sp)]
+    else:
+        _sides = None
+        regions = propose_regions(prim)
+    if _sides is not None:
+        # Span assignment must respect the split too: run against the whole
+        # page it re-pools spans from both sides into whichever region is
+        # nearest, putting the margin note straight back into the inner
+        # page's block.
+        regions = [r for sp, rs in zip(_sides, _split_regions_by_side(regions, _sides))
+                   for r in assign_spans(sp, rs)]
+    else:
+        regions = assign_spans(prim, regions)
     regions = split_disjoint_tables(regions)
     # Column-boundary detection (inside order_regions) needs the page's
     # flowing prose, not a table's own cell text -- a table commonly
@@ -569,7 +622,20 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     if geometry_bidi:
         try:
             from . import geobidi
-            geo_lines = geobidi.page_lines(page, raw=raw)
+            if nested is not None:
+                # Rebuild lines per side as well. Region splitting alone is
+                # not enough: a geo line is built across the whole page, so
+                # one line can hold the inner page's heading AND the margin
+                # note beside it, and whichever region owns that line
+                # inherits both. Clipping is what actually keeps them apart.
+                nx0, ny0, nx1, ny1 = nested
+                pw, ph = prim.width, prim.height
+                geo_lines = (geobidi.page_lines(page, clip=(nx0, ny0, nx1, ny1))
+                             + [ln for ln in geobidi.page_lines(page, raw=raw)
+                                if not (nx0 <= (ln[0][0] + ln[0][2]) / 2 <= nx1
+                                        and ny0 <= (ln[0][1] + ln[0][3]) / 2 <= ny1)])
+            else:
+                geo_lines = geobidi.page_lines(page, raw=raw)
         except Exception:
             geo_lines = []
 
