@@ -245,6 +245,17 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
     matched back into `raw` by (font, origin) since both calls resolve the
     same underlying glyph run. A real digit '1' glyph is untouched: it has
     its own distinct glyph ID with its own (non-whitespace) tally.
+
+    Every occurrence of a consensus space glyph is corrected, without first
+    checking how get_texttrace() happened to decode that particular one.
+    The two calls decode independently and *either* can be the one that is
+    wrong: confirmed real case (Arabic teacher's guide p19, InDesign ->
+    Adobe PDF Library) where texttrace read glyph 3 correctly as a space
+    while rawdict read the very same glyph as '1', injecting a phantom
+    digit that duplicated every list number ("1 .1") and split the numbered
+    list into a spurious third table column. Gating on the trace's own
+    reading would only ever catch the disagreements that fall the other
+    way. Forcing a space to a space is a no-op, so the wider rule is free.
     """
     try:
         doc = page.parent
@@ -260,8 +271,8 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
     bad_positions = {
         (span.get("font", ""), round(origin[0], 1), round(origin[1], 1))
         for span in trace
-        for code, glyph, origin, _bbox in span.get("chars", [])
-        if (span.get("font", ""), glyph) in space_glyphs and not chr(code).isspace()
+        for _code, glyph, origin, _bbox in span.get("chars", [])
+        if (span.get("font", ""), glyph) in space_glyphs
     }
     if not bad_positions:
         return raw
@@ -275,6 +286,13 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
                 for ch in span.get("chars", []):
                     o = ch.get("origin")
                     if o is None:
+                        continue
+                    if ch["c"].isspace():
+                        # Already whitespace, so nothing is corrupt here --
+                        # and it may be a *specific* typographic space the
+                        # document means (U+2009 thin space between math
+                        # tokens, U+2007 figure space aligning numerals).
+                        # Rewriting those to a plain space is data loss.
                         continue
                     if (font, round(o[0], 1), round(o[1], 1)) in bad_positions:
                         ch["c"] = " "
