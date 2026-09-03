@@ -120,6 +120,11 @@ class PagePrimitives:
     spans: list[Span] = field(default_factory=list)
     fills: list[Fill] = field(default_factory=list)
     images: list[ImageRef] = field(default_factory=list)
+    # Large background rectangles, kept separately from `fills`. They are
+    # not content containers (see the full-page-tint note in extract_page)
+    # but they do carry the page's own physical structure -- see
+    # layout.nested_page_rect.
+    backgrounds: list[Fill] = field(default_factory=list)
 
     @property
     def char_count(self) -> int:
@@ -699,6 +704,23 @@ def _chars_to_text_fixing_lam_alef(chars: list) -> str:
     return "".join(out)
 
 
+def _record_background(prim: PagePrimitives, r, rgb) -> None:
+    """Keep a large background rectangle that `fills` deliberately drops.
+
+    Dropping it from `fills` is right -- it is not a content container.
+    But its geometry still describes the page's physical structure, and
+    layout.nested_page_rect needs it to see a page reproduced inside
+    another page.
+    """
+    if (r.x1 - r.x0) * (r.y1 - r.y0) < 0.10 * prim.width * prim.height:
+        return
+    try:
+        color = tuple(float(c) for c in rgb)
+    except Exception:
+        return
+    prim.backgrounds.append(Fill(bbox=(r.x0, r.y0, r.x1, r.y1), color=color))
+
+
 def extract_page(page: "fitz.Page", drop_white_fills: bool = True,
                  drop_full_page_frac: float = 0.6, raw: dict | None = None) -> PagePrimitives:
     prim = PagePrimitives(
@@ -802,6 +824,7 @@ def extract_page(page: "fitz.Page", drop_white_fills: bool = True,
             if stroke_rgb is not None and not _near_white(stroke_rgb):
                 rgb = stroke_rgb
             else:
+                _record_background(prim, r, rgb)
                 continue
         # A full-page background tint (sometimes drawn with bleed, extending
         # past the crop box entirely) is not a semantic container -- a real
@@ -809,6 +832,7 @@ def extract_page(page: "fitz.Page", drop_white_fills: bool = True,
         # covers the majority of the page. Left in, it swallows nearly every
         # span on the page into one "panel" and destroys reading order.
         if (r.x1 - r.x0) * (r.y1 - r.y0) >= drop_full_page_frac * prim.width * prim.height:
+            _record_background(prim, r, rgb)
             continue
         points = _drawing_points(d)
         prim.fills.append(Fill(bbox=(r.x0, r.y0, r.x1, r.y1), color=tuple(rgb),

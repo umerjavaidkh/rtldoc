@@ -24,7 +24,7 @@ from dataclasses import dataclass, field, asdict
 import fitz
 
 from . import arabic, visual
-from .layout import Region, assign_spans, group_by_line, order_regions, propose_regions, split_disjoint_tables
+from .layout import nested_page_rect, Region, assign_spans, group_by_line, order_regions, propose_regions, split_disjoint_tables
 from .primitives import PagePrimitives, Span, containment, extract_page, style_profile
 
 DIGITS = re.compile(r"^[\s\u0660-\u0669\u06F0-\u06F90-9]{1,3}$")
@@ -560,7 +560,8 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     # case this fixes).
     table_bboxes = [r.bbox for r in regions if r.kind == "table"]
     flow_spans = [s for s in prim.spans if not any(containment(s.bbox, tb) > 0.5 for tb in table_bboxes)]
-    regions = order_regions(regions, prim.width, prim.height, rtl=is_rtl_page, spans=flow_spans)
+    regions = order_regions(regions, prim.width, prim.height, rtl=is_rtl_page,
+                            spans=flow_spans, nested=nested_page_rect(prim))
     result.columns = len({r.column for r in regions})
     _link_activities(regions)
 

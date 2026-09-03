@@ -2471,10 +2471,84 @@ def rtl_xy_cut(regions: list[Region], min_gap: float = 14.0, depth: int = 0, rtl
     return sorted(regions, key=key)
 
 
+def nested_page_rect(prim: PagePrimitives) -> Rect | None:
+    """The rectangle of a page reproduced INSIDE this page, if there is one.
+
+    Some documents print one page inside another: a teacher's guide around
+    a reduced student page, an annotated reprint, a facsimile edition, a
+    slide with its notes. The two carry unrelated content -- an exercise
+    and its answer key, a slide and its script -- and interleaving them by
+    pure geometry produces chunks that mix both, which is worse for
+    retrieval than either alone.
+
+    The file states the structure: the inner page is drawn as its own
+    background rectangle, in a different colour from the outer page's own
+    background. Requiring text on BOTH sides is what keeps this from
+    firing on an ordinary tinted callout box -- a callout has no content
+    outside itself to be separated from.
+
+    Nothing here is document-specific: it needs two background rectangles
+    of different colours, one inside the other, with text in both.
+    """
+    if not prim.backgrounds or not prim.spans:
+        return None
+    page_area = prim.width * prim.height
+    if page_area <= 0:
+        return None
+
+    def _area(b) -> float:
+        return (b[2] - b[0]) * (b[3] - b[1])
+
+    outers = [f for f in prim.backgrounds if _area(f.bbox) >= 0.9 * page_area]
+    if not outers:
+        return None
+    inners = [f for f in prim.backgrounds
+              if 0.15 * page_area <= _area(f.bbox) <= 0.85 * page_area]
+    if not inners:
+        return None
+
+    def _differs(a, b) -> bool:
+        return max(abs(x - y) for x, y in zip(a, b)) > 0.02
+
+    for f in sorted(inners, key=lambda f: -_area(f.bbox)):
+        if not any(_differs(f.color, o.color) for o in outers):
+            continue
+        x0, y0, x1, y1 = f.bbox
+        inside = outside = 0
+        for sp in prim.spans:
+            if not sp.text.strip():
+                continue
+            cx = (sp.bbox[0] + sp.bbox[2]) / 2
+            cy = (sp.bbox[1] + sp.bbox[3]) / 2
+            if x0 <= cx <= x1 and y0 <= cy <= y1:
+                inside += 1
+            else:
+                outside += 1
+        if inside >= 3 and outside >= 3:
+            return (x0, y0, x1, y1)
+    return None
+
+
 def order_regions(regions: list[Region], page_width: float, page_height: float, rtl: bool = True,
-                  spans: list[Span] | None = None) -> list[Region]:
+                  spans: list[Span] | None = None,
+                  nested: Rect | None = None) -> list[Region]:
     detect_columns(regions, page_width, page_height, rtl=rtl, spans=spans)
     ordered = rtl_xy_cut(regions, rtl=rtl)
+    if nested is not None:
+        # Emit the nested page's own content as one contiguous run, and the
+        # surrounding page as another, instead of interleaving the two by
+        # geometry. Each group keeps the order the xy-cut gave it, and the
+        # group whose first region came first stays first, so this only
+        # ever un-interleaves -- it never reorders within a page.
+        x0, y0, x1, y1 = nested
+        def _in(r: Region) -> bool:
+            cx = (r.bbox[0] + r.bbox[2]) / 2
+            cy = (r.bbox[1] + r.bbox[3]) / 2
+            return x0 <= cx <= x1 and y0 <= cy <= y1
+        a = [r for r in ordered if _in(r)]
+        b = [r for r in ordered if not _in(r)]
+        if a and b:
+            ordered = (a + b) if ordered[0] in a else (b + a)
     for i, r in enumerate(ordered):
         r.order = i
     return ordered
