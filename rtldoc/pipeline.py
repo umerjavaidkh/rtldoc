@@ -126,8 +126,33 @@ def _region_text(region: Region, opts: arabic.NormalizeOptions) -> tuple[str, di
     out, diags = [], {"reversed_lines": 0, "presentation_forms": 0}
     for row in lines:
         rtl = any(arabic.is_arabic(s.text) for s in row)
-        row.sort(key=lambda s: -s.bbox[0] if rtl else s.bbox[0])
-        raw = " ".join(s.text for s in row)
+        # A producer can emit a word's last letter as its own run, leaving
+        # that run's x-range nested INSIDE the main run's box and abutting
+        # it exactly. Sorting by x0 then joining with " " both misorders it
+        # and splits the word -- confirmed real case: "يؤثّر" and "وجذّاب؟"
+        # came out as "يؤث" + "ر" and "وجذ" + "اب؟". Ordinary rows have no
+        # nesting, so they keep the original path untouched.
+        nested = any(
+            a is not b and a.bbox[0] >= b.bbox[0] and a.bbox[2] <= b.bbox[2]
+            for a in row for b in row
+        )
+        if not nested:
+            row.sort(key=lambda s: -s.bbox[0] if rtl else s.bbox[0])
+            raw = " ".join(s.text for s in row)
+        else:
+            # Order by the edge the line starts from -- the trailing edge is
+            # what says which run comes first when one contains the other --
+            # and join without a space where the runs actually touch.
+            row.sort(key=lambda s: -s.bbox[2] if rtl else s.bbox[0])
+            parts: list[str] = []
+            for i, sp in enumerate(row):
+                if i:
+                    prev = row[i - 1]
+                    gap = (prev.bbox[0] - sp.bbox[2]) if rtl else (sp.bbox[0] - prev.bbox[2])
+                    if gap > 0.0:
+                        parts.append(" ")
+                parts.append(sp.text)
+            raw = "".join(parts)
         clean, d = arabic.normalize(raw, opts)
         diags["reversed_lines"] += int(d["was_reversed"])
         diags["presentation_forms"] += int(d["had_presentation_forms"])
@@ -136,8 +161,33 @@ def _region_text(region: Region, opts: arabic.NormalizeOptions) -> tuple[str, di
     return "\n".join(out), diags
 
 
+def _marker_glyph(cell, fills) -> str:
+    """'○' for a cell whose only content besides text is a drawn marker.
+
+    A checkbox/radio marker is a stroked, near-square, small outline with
+    no text of its own -- a rating or checklist column renders as an empty
+    cell without it, which loses the fact that the row was a question
+    awaiting an answer. Shape-based, so it holds for any producer.
+    """
+    if not fills:
+        return ""
+    x0, y0, x1, y1 = cell.bbox
+    for f in fills:
+        if not f.is_stroke:
+            continue
+        w, h = f.bbox[2] - f.bbox[0], f.bbox[3] - f.bbox[1]
+        if not (3.0 < w < 30.0 and 3.0 < h < 30.0):
+            continue
+        if abs(w - h) > max(w, h) * 0.15:          # near-square -> round
+            continue
+        cx, cy = (f.bbox[0] + f.bbox[2]) / 2, (f.bbox[1] + f.bbox[3]) / 2
+        if x0 <= cx <= x1 and y0 <= cy <= y1:
+            return "\u25cb"
+    return ""
+
+
 def _table_grid(region: Region, owned: dict[int, list],
-                opts: arabic.NormalizeOptions) -> tuple[list[list[str]], dict]:
+                opts: arabic.NormalizeOptions, fills=None) -> tuple[list[list[str]], dict]:
     """Build the raw (row, col) text grid for a detected table (see
     layout.detect_tables). Cell text goes through the same geometry-first
     bidi/repair path as everything else -- only the grid layout itself comes
@@ -157,6 +207,13 @@ def _table_grid(region: Region, owned: dict[int, list],
                 text, d = _region_text(cell, opts)
         else:
             text, d = _region_text(cell, opts)
+        # Annotate a cell that has content; never create content. A marker
+        # alone must not keep an otherwise-empty cell (and with it an empty
+        # table) alive -- doing so resurrected 12 junk 1x2 "○ ○" grids.
+        if text:
+            mark = _marker_glyph(cell, fills)
+            if mark:
+                text = f"{mark} {text}"
         diags["reversed_lines"] += d.get("reversed_lines", 0)
         diags["presentation_forms"] += d.get("presentation_forms", 0)
         grid[cell.table_row][cell.table_col] = text.strip()
@@ -172,11 +229,12 @@ def _table_grid(region: Region, owned: dict[int, list],
     return [[grid[ri][ci] for ci in keep_cols] for ri in keep_rows], diags
 
 
-def _table_text(region: Region, owned: dict[int, list], opts: arabic.NormalizeOptions) -> tuple[str, dict, list]:
+def _table_text(region: Region, owned: dict[int, list], opts: arabic.NormalizeOptions,
+                fills=None) -> tuple[str, dict, list]:
     """Render a detected table as a GFM markdown table. Returns (markdown,
     diagnostics, grid) -- the grid is exposed so to_html can build a real
     <table> instead of re-parsing markdown pipes back into cells."""
-    grid, diags = _table_grid(region, owned, opts)
+    grid, diags = _table_grid(region, owned, opts, fills)
     if not grid:
         return "", diags, grid
     ncols = len(grid[0])
@@ -573,7 +631,7 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     for r in regions:
         grid = None
         if r.kind == "table":
-            text, diag, grid = _table_text(r, owned, opts)
+            text, diag, grid = _table_text(r, owned, opts, prim.fills)
             # A "table" with no text in any cell is never a real table -- it
             # is a false positive from stray rules (confirmed real case: a
             # flowchart's thin connector lines, classified as rule fills,
