@@ -1005,7 +1005,47 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
         if not any(containment(t.bbox, wt.bbox) > 0.3 or containment(wt.bbox, t.bbox) > 0.3
                    for wt in row_wrapped):
             best_tables.append(t)
-    return best_tables
+    return _drop_column_straddlers(best_tables, prim)
+
+
+def _drop_column_straddlers(tables: list[Region], prim: PagePrimitives) -> list[Region]:
+    """Reject a borderless table that spans a page column gutter.
+
+    group_by_line has no column awareness, so on a multi-column page it
+    pools spans from BOTH columns into one "line". Alignments that are
+    real within each column then look like one wide table, and the cells
+    interleave unrelated content -- confirmed real case (Arabic teacher's
+    guide p54): a lesson list in the left panel and a standards list in
+    the right column fused into a 4-column grid whose cells read as
+    scrambled fragments of both.
+
+    A gutter is empty by construction, so nothing legitimately narrow
+    straddles one. A genuinely full-width table does cross it, and stays:
+    the test is crossing a gutter WITHOUT spanning essentially the whole
+    content width.
+    """
+    if not tables:
+        return tables
+    boxes = [sp.bbox for sp in prim.spans]
+    if not boxes:
+        return tables
+    bounds = _column_boundaries(boxes, prim.width, prim.height)
+    if len(bounds) < 3:                       # single column -> no gutter
+        return tables
+    inner = [float(b) for b in bounds[1:-1]]
+    x0 = min(b[0] for b in boxes)
+    x1 = max(b[2] for b in boxes)
+    content_w = x1 - x0
+    if content_w <= 0:
+        return tables
+    kept = []
+    for t in tables:
+        w = t.bbox[2] - t.bbox[0]
+        straddles = any(t.bbox[0] + 2.0 < g < t.bbox[2] - 2.0 for g in inner)
+        if straddles and w < content_w * 0.9:
+            continue
+        kept.append(t)
+    return kept
 
 
 def _detect_borderless_in_lines(lines: list[list[Span]], edge, min_rows: int, min_cols: int,
