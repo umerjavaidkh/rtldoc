@@ -1068,6 +1068,23 @@ def _drop_column_straddlers(tables: list[Region], prim: PagePrimitives) -> list[
         straddles = any(t.bbox[0] + 2.0 < g < t.bbox[2] - 2.0 for g in inner)
         if straddles and w < content_w * 0.9:
             continue
+        # The gutters above are computed from EVERY span, the candidate's
+        # own cells included -- so a table fusing two page columns supplies
+        # the very evidence that makes it look full-width and exempt.
+        # Recompute from the content OUTSIDE it: a gutter that survives
+        # that is proven by unrelated prose, and nothing legitimately
+        # spans one. Confirmed real case (p102): a "table" running the
+        # full content width crossed a gutter at x=482 that the
+        # surrounding prose keeps open, and it fused the teacher's margin
+        # column with the lesson text.
+        outside = [b for b in boxes
+                   if not (t.bbox[0] - 2.0 <= (b[0] + b[2]) / 2 <= t.bbox[2] + 2.0
+                           and t.bbox[1] - 2.0 <= (b[1] + b[3]) / 2 <= t.bbox[3] + 2.0)]
+        if len(outside) > 3:
+            ob = _column_boundaries(outside, prim.width, prim.height)
+            if len(ob) >= 3 and any(t.bbox[0] + 2.0 < float(g) < t.bbox[2] - 2.0
+                                    for g in ob[1:-1]):
+                continue
         kept.append(t)
     return kept
 
