@@ -392,14 +392,24 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
     # space deleted the marker outright, while "2." -- which has no such
     # overlay -- survived. The phantom-digit case this repair exists for is
     # unaffected: there the origin carries ONLY the space glyph.
-    overlay_positions = {
-        (span.get("font", ""), round(origin[0], 1), round(origin[1], 1))
-        for span in trace
-        for code, glyph, origin, _bbox in span.get("chars", [])
-        if code and not chr(code).isspace()
-        and (span.get("font", ""), glyph) not in space_glyphs
-    }
-    bad_positions -= overlay_positions
+    # What a real (non-space) glyph at a position actually decodes to.
+    # Excluding the whole POSITION was too blunt: a diacritic drawn at the
+    # same origin as the space glyph shielded the space glyph's own bad
+    # reading from repair, so a literal '1' stayed between words (p83,
+    # origin 320.4/174.6 carries fatha gid 260 AND space gid 3). Exclude
+    # only when the character rawdict reports IS the real glyph's own
+    # character -- that is the p54 case, a marker digit the space glyph is
+    # drawn over, which must not be deleted.
+    overlay_chars: dict[tuple, set] = {}
+    for span in trace:
+        font = span.get("font", "")
+        for code, glyph, origin, _bbox in span.get("chars", []):
+            if not code or chr(code).isspace():
+                continue
+            if (font, glyph) in space_glyphs:
+                continue
+            key = (font, round(origin[0], 1), round(origin[1], 1))
+            overlay_chars.setdefault(key, set()).add(chr(code))
 
     if not bad_positions and not ink_positions and not undecoded:
         return raw
@@ -430,7 +440,8 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
                         # tokens, U+2007 figure space aligning numerals).
                         # Rewriting those to a plain space is data loss.
                         continue
-                    if (font, round(o[0], 1), round(o[1], 1)) in bad_positions:
+                    key = (font, round(o[0], 1), round(o[1], 1))
+                    if key in bad_positions and ch["c"] not in overlay_chars.get(key, ()):
                         ch["c"] = " "
     return raw
 
