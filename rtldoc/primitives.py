@@ -307,6 +307,9 @@ def _document_space_glyphs(doc: "fitz.Document", min_samples: int = 5,
     return space_glyphs
 
 
+_ASCII_PUNCT = frozenset('.,:;!?()[]{}-/\\"\'')
+
+
 def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
     """Repair space glyphs whose ToUnicode CMap is internally inconsistent.
 
@@ -424,6 +427,21 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
                     o = ch.get("origin")
                     if o is None:
                         continue
+                    # rawdict can decode a punctuation glyph as a DIGIT --
+                    # the period after a list number came out as '0' or
+                    # '1', so "10." read as "010" and "11." as "111"
+                    # (confirmed p71 and p123). Digits and punctuation are
+                    # never shaping variants of one another, so a
+                    # disagreement of that shape is always rawdict's error;
+                    # the general "trust texttrace" rule would be wrong,
+                    # since texttrace reports presentation forms where
+                    # rawdict correctly gives base letters (half of one
+                    # Arabic Wikipedia page).
+                    if ch["c"].isdigit():
+                        alt = undecoded.get((font, round(o[0], 1), round(o[1], 1)))
+                        if alt is not None and alt in _ASCII_PUNCT:
+                            ch["c"] = alt
+                            continue
                     if ch["c"] == "\ufffd":
                         fixed = undecoded.get((font, round(o[0], 1), round(o[1], 1)))
                         if fixed is not None:
