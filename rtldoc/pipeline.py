@@ -243,6 +243,33 @@ def _split_regions_at_nested(regions: list[Region], nested) -> list[Region]:
     return out
 
 
+_LEAD_NUM = re.compile(r"^\s*(\d{1,2})\s+")
+
+
+def _strip_repeated_activity_number(blocks: list["Block"]) -> None:
+    """Remove an activity number the chip already carries.
+
+    The chip sits on the same baseline as the first line of the text it
+    introduces, so the geo line built for that baseline picks up the
+    chip's digit and the paragraph starts with it -- while the chip block
+    renders the same digit itself. The number then appears twice, once
+    detached above the text ("1" alone, then "1 حوّلْ أبياتَ ...").
+
+    Only stripped when a marker block for that very number exists and the
+    paragraph is linked to it, so a paragraph that genuinely begins with a
+    numeral is untouched.
+    """
+    marks = {b.text.strip() for b in blocks if b.role == "activity_marker"}
+    if not marks:
+        return
+    for b in blocks:
+        if b.role in ("activity_marker", "table") or not (b.text or "").strip():
+            continue
+        m = _LEAD_NUM.match(b.text)
+        if m and m.group(1) in marks and str(b.activity or "") == m.group(1):
+            b.text = b.text[m.end():]
+
+
 def _table_grid(region: Region, owned: dict[int, list],
                 opts: arabic.NormalizeOptions, fills=None,
                 page=None) -> tuple[list[list[str]], dict]:
@@ -888,6 +915,7 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
         except Exception:
             result.visual = None
 
+    _strip_repeated_activity_number(result.blocks)
     return result
 
 
@@ -1104,7 +1132,11 @@ def to_html(result: PageResult) -> str:
             level = levels.get(id(b), 2)
             out.append(f'<h{level}{_dir_attr(b.text)}{tag_attr}>{_html.escape(b.text)}</h{level}>')
         elif b.role == "activity_marker":
-            out.append(f'<h3 class="activity-marker"{tag_attr}>{_html.escape(b.text)}</h3>')
+            # dir="rtl" like every other block: a bare digit has no
+            # strong-direction character of its own, so without it the
+            # marker resolves LTR and sits at the left edge while the RTL
+            # text it belongs to is at the right.
+            out.append(f'<h3 class="activity-marker" dir="rtl"{tag_attr}>{_html.escape(b.text)}</h3>')
         elif b.role == "passage":
             paras = "".join(f"<p>{_html.escape(p)}</p>" for p in b.text.split("\n") if p.strip())
             out.append(f'<blockquote{_dir_attr(b.text)}{tag_attr}>{paras}</blockquote>')
