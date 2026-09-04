@@ -1005,7 +1005,31 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
         if not any(containment(t.bbox, wt.bbox) > 0.3 or containment(wt.bbox, t.bbox) > 0.3
                    for wt in row_wrapped):
             best_tables.append(t)
-    return _drop_column_straddlers(best_tables, prim)
+    return _drop_column_straddlers(_drop_nested_page_straddlers(best_tables, prim), prim)
+
+
+def _drop_nested_page_straddlers(tables: list[Region], prim: PagePrimitives) -> list[Region]:
+    """Reject a table spanning both a nested page and its surroundings.
+
+    A page printed inside another page is a separate physical page, and no
+    table spans two pages. Checked separately from the column-gutter rule
+    because that one returns early when the page has no gutters, and
+    because such a table is exactly the one that looks legitimately
+    full-width: confirmed real case (p99), a grid running x=43..679 across
+    the inner page AND the teacher's margin swallowed the page's prose and
+    dropped letter coverage to 0.457.
+    """
+    nested = nested_page_rect(prim)
+    if nested is None:
+        return tables
+    nx0, _a, nx1, _b = nested
+    out = []
+    for t in tables:
+        lo, hi = t.bbox[0] + 2.0, t.bbox[2] - 2.0
+        if lo < nx0 < hi or lo < nx1 < hi:
+            continue
+        out.append(t)
+    return out
 
 
 def _drop_column_straddlers(tables: list[Region], prim: PagePrimitives) -> list[Region]:
