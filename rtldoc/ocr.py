@@ -25,7 +25,75 @@ def available() -> bool:
     return shutil.which("tesseract") is not None
 
 
-def ocr_page(page: "object", dpi: int = 300, lang: str = "eng") -> list[tuple[str, tuple]]:
+def installed_langs() -> set:
+    """Language packs tesseract can actually load."""
+    if not available():
+        return set()
+    try:
+        out = subprocess.run(["tesseract", "--list-langs"], capture_output=True,
+                             text=True, timeout=20).stdout
+        return {ln.strip() for ln in out.splitlines()[1:] if ln.strip()}
+    except Exception:
+        return set()
+
+
+def pick_lang(page: "object", default: str = "eng") -> str:
+    """Choose the OCR language from the page's OWN glyphs where it has any.
+
+    A scanned page has no text layer, but a document is rarely wholly
+    scanned: its other pages, or this page's own stamps and headers,
+    usually carry enough characters to name the script. Guessing "eng" on
+    an Arabic page is not a small error -- tesseract will emit confident
+    Latin nonsense rather than nothing, which is worse than no output.
+    """
+    langs = installed_langs()
+    if not langs:
+        return default
+    try:
+        doc = page.parent
+        sample = ""
+        for i in range(min(getattr(doc, "page_count", 0), 12)):
+            sample += doc[i].get_text()
+            if len(sample) > 4000:
+                break
+    except Exception:
+        sample = ""
+    arabic = sum(1 for c in sample if "\u0600" <= c <= "\u06ff")
+    if arabic > 40 and arabic / max(1, len(sample)) > 0.15 and "ara" in langs:
+        return "ara+eng" if "eng" in langs else "ara"
+
+    # A wholly-scanned document has no text anywhere to sample, which is
+    # exactly the case that matters: guessing English there makes
+    # tesseract emit confident Latin nonsense for Arabic script rather
+    # than nothing. Ask tesseract itself which script it sees.
+    if not sample.strip() and "ara" in langs:
+        if detect_script(page) == "Arabic":
+            return "ara+eng" if "eng" in langs else "ara"
+    return default if default in langs else next(iter(langs))
+
+
+def detect_script(page: "object", dpi: int = 150) -> str | None:
+    """Tesseract's own orientation-and-script detection for one page."""
+    if not available():
+        return None
+    try:
+        import fitz
+        zoom = dpi / 72.0
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            img = Path(tmp) / "osd.png"
+            pix.save(str(img))
+            out = subprocess.run(["tesseract", str(img), "stdout", "--psm", "0"],
+                                 capture_output=True, text=True, timeout=60).stdout
+        for line in out.splitlines():
+            if line.startswith("Script:"):
+                return line.split(":", 1)[1].strip()
+    except Exception:
+        return None
+    return None
+
+
+def ocr_page(page: "object", dpi: int = 300, lang: str | None = None) -> list[tuple[str, tuple]]:
     """Render `page` and OCR it. Returns a list of (text, bbox) paragraphs
     in reading order (top-to-bottom). Empty if tesseract isn't installed,
     the page has no recognizable text, or the OCR call itself fails --
@@ -35,6 +103,8 @@ def ocr_page(page: "object", dpi: int = 300, lang: str = "eng") -> list[tuple[st
     """
     if not available():
         return []
+    if lang is None:
+        lang = pick_lang(page)
 
     import fitz
     zoom = dpi / 72.0
@@ -77,6 +147,7 @@ def ocr_page(page: "object", dpi: int = 300, lang: str = "eng") -> list[tuple[st
             # analysis already groups words into lines and paragraphs;
             # reusing that instead of re-deriving it from scratch.
             "line_key": (r.get("block_num"), r.get("par_num"), r.get("line_num")),
+            "word_num": int(r.get("word_num") or 0),
             "para_key": (r.get("block_num"), r.get("par_num")),
         })
     if not words:
@@ -89,7 +160,12 @@ def ocr_page(page: "object", dpi: int = 300, lang: str = "eng") -> list[tuple[st
     paras: dict[tuple, list[tuple]] = {}
     line_rows = []
     for key, ws in lines.items():
-        ws.sort(key=lambda w: w["bbox"][0])
+        # Tesseract already emits a line's words in READING order, so keep
+        # it. Re-sorting by x is right-to-left backwards for Arabic and
+        # reversed every line ("وزارة التعليم العالي" came out
+        # "العالي التعليم وزارة"), which is worse than not running OCR at
+        # all -- the words are all present and all in the wrong order.
+        ws.sort(key=lambda w: w["word_num"])
         text = " ".join(w["text"] for w in ws)
         x0 = min(w["bbox"][0] for w in ws)
         y0 = min(w["bbox"][1] for w in ws)
