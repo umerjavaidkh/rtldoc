@@ -824,7 +824,14 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
             if prev is not None:
                 prev[1].text = ""
             claimed[id(src)] = (dist, b)
-            b.text = src.text.strip().replace("\n", " ")[:120]
+            # Judge the candidate by its OWN length: truncating a long
+            # paragraph to 120 chars produced a "caption" that was simply
+            # that paragraph's opening, duplicated into the figure while
+            # the paragraph stayed in the output (20 pages of this book
+            # carried the same text twice -- two retrieval chunks with
+            # identical content).
+            _cap = src.text.strip().replace("\n", " ")
+            b.text = _cap if len(_cap) <= 120 else ""
 
     for b in result.blocks:
         if b.activity is None:
