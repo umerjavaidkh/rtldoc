@@ -204,6 +204,45 @@ def _marker_glyph(cell, fills) -> str:
     return ""
 
 
+def _split_regions_at_nested(regions: list[Region], nested) -> list[Region]:
+    """Cut a flow region that straddles a nested page's edge.
+
+    group_by_line has no column awareness, so on a page printing another
+    page inside it one flow region can cover BOTH -- on p112 its bbox runs
+    x=65..678, from the inner page's bottom content across to the outer
+    page's right margin. Everything it holds is then ordered as a single
+    unit, which drags the inner page's LAST activity to the top of the
+    output and interleaves the margin notes with it.
+
+    Cutting it in two along the boundary keeps each side's material
+    together and in its own reading order. Only flow regions are cut: a
+    table or panel that genuinely spans the edge is left alone.
+    """
+    nx0, ny0, nx1, ny1 = nested
+    out: list[Region] = []
+    for r in regions:
+        spans = r.spans or []
+        if r.kind != "flow" or len(spans) < 2:
+            out.append(r)
+            continue
+
+        def _in(sp) -> bool:
+            cx = (sp.bbox[0] + sp.bbox[2]) / 2
+            cy = (sp.bbox[1] + sp.bbox[3]) / 2
+            return nx0 <= cx <= nx1 and ny0 <= cy <= ny1
+
+        a = [sp for sp in spans if _in(sp)]
+        b = [sp for sp in spans if not _in(sp)]
+        if not a or not b:
+            out.append(r)
+            continue
+        for part in (a, b):
+            bbox = (min(sp.bbox[0] for sp in part), min(sp.bbox[1] for sp in part),
+                    max(sp.bbox[2] for sp in part), max(sp.bbox[3] for sp in part))
+            out.append(Region(kind=r.kind, bbox=bbox, spans=list(part)))
+    return out
+
+
 def _table_grid(region: Region, owned: dict[int, list],
                 opts: arabic.NormalizeOptions, fills=None,
                 page=None) -> tuple[list[list[str]], dict]:
@@ -602,6 +641,8 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
         regions = [r for sp, rs in zip(_sides, _per_side) for r in assign_spans(sp, rs)]
     else:
         regions = assign_spans(prim, regions)
+    if nested is not None:
+        regions = _split_regions_at_nested(regions, nested)
     regions = split_disjoint_tables(regions)
     # Column-boundary detection (inside order_regions) needs the page's
     # flowing prose, not a table's own cell text -- a table commonly

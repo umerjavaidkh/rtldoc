@@ -2589,7 +2589,11 @@ def order_regions(regions: list[Region], page_width: float, page_height: float, 
         a = [r for r in ordered if _in(r)]
         b = [r for r in ordered if not _in(r)]
         if a and b:
-            ordered = (a + b) if ordered[0] in a else (b + a)
+            # Inner page first, then the surrounding page. The nested page
+            # is the document being reproduced; the margin around it is
+            # commentary on it, and reading the commentary first inverts
+            # the sense (an answer key ahead of its own exercise).
+            ordered = a + b
     for i, r in enumerate(ordered):
         r.order = i
     return ordered
