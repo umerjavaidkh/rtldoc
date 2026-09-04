@@ -317,9 +317,23 @@ def _resolve_runs(line: list[Glyph]) -> list[Glyph]:
     for i, c in enumerate(classes):
         if c != "N":
             continue
-        prev = next((classes[j] for j in range(i - 1, -1, -1) if classes[j] != "N"), None)
-        nxt = next((classes[j] for j in range(i + 1, len(classes)) if classes[j] != "N"), None)
-        resolved[i] = "L" if prev == "L" and nxt == "L" else "R"
+        pj = next((j for j in range(i - 1, -1, -1) if classes[j] != "N"), None)
+        nj = next((j for j in range(i + 1, len(classes)) if classes[j] != "N"), None)
+        prev = classes[pj] if pj is not None else None
+        nxt = classes[nj] if nj is not None else None
+        joins = prev == "L" and nxt == "L"
+        if joins and pj is not None and nj is not None:
+            # N1 bridges a neutral between two LTR runs -- right when they
+            # are one number ("10 of 12"), wrong when they are separate
+            # elements that merely sit side by side. Type size says which:
+            # an activity chip set at 17.5pt beside a 12.0pt duration is
+            # not one run, and merging them flipped "11 (10 دقائق)" into
+            # "10( 11 دقائق)". Same size still merges, so ordinary mixed
+            # numbers are untouched.
+            a, b = line[pj].size, line[nj].size
+            if max(a, b) > 0 and abs(a - b) > max(a, b) * 0.15:
+                joins = False
+        resolved[i] = "L" if joins else "R"
 
     out: list[Glyph] = []
     mirrorable: list[int] = []
