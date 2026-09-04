@@ -204,21 +204,6 @@ def _marker_glyph(cell, fills) -> str:
     return ""
 
 
-def _split_regions_by_side(regions: list[Region], sides) -> list[list[Region]]:
-    """Partition regions back to the side of the page they were built from."""
-    out = []
-    for sp in sides:
-        keep = []
-        for r in regions:
-            cx = (r.bbox[0] + r.bbox[2]) / 2
-            cy = (r.bbox[1] + r.bbox[3]) / 2
-            if any(s.bbox[0] - 1 <= cx <= s.bbox[2] + 1 and s.bbox[1] - 1 <= cy <= s.bbox[3] + 1
-                   for s in sp.spans):
-                keep.append(r)
-        out.append(keep)
-    return out
-
-
 def _table_grid(region: Region, owned: dict[int, list],
                 opts: arabic.NormalizeOptions, fills=None,
                 page=None) -> tuple[list[list[str]], dict]:
@@ -593,35 +578,20 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     # margin note beside it, and no ordering can unpick a block that
     # already mixes both. Splitting the spans first is what actually keeps
     # an exercise and its answer key out of the same retrieval chunk.
+    # NOTE: splitting primitives per side is disabled. It separated the two
+    # pages correctly, but one side's flow region absorbed spans that other
+    # regions of that same side also emitted -- 818 duplicated letters on
+    # p112 alone, against a page holding only 2201. Ordering still groups
+    # the two sides below, which un-interleaves without duplicating.
     nested = nested_page_rect(prim)
-    if nested is not None:
-        nx0, ny0, nx1, ny1 = nested
-
-        def _inside(bbox) -> bool:
-            cx = (bbox[0] + bbox[2]) / 2
-            cy = (bbox[1] + bbox[3]) / 2
-            return nx0 <= cx <= nx1 and ny0 <= cy <= ny1
-
-        def _side(want_inside: bool) -> PagePrimitives:
-            return dataclasses.replace(
-                prim,
-                spans=[x for x in prim.spans if _inside(x.bbox) == want_inside],
-                fills=[x for x in prim.fills if _inside(x.bbox) == want_inside],
-                images=[x for x in prim.images if _inside(x.bbox) == want_inside],
-            )
-
-        _sides = [_side(True), _side(False)]
-        regions = [r for sp in _sides for r in propose_regions(sp)]
-    else:
-        _sides = None
-        regions = propose_regions(prim)
+    _sides = _per_side = None
+    regions = propose_regions(prim)
     if _sides is not None:
         # Span assignment must respect the split too: run against the whole
         # page it re-pools spans from both sides into whichever region is
         # nearest, putting the margin note straight back into the inner
         # page's block.
-        regions = [r for sp, rs in zip(_sides, _split_regions_by_side(regions, _sides))
-                   for r in assign_spans(sp, rs)]
+        regions = [r for sp, rs in zip(_sides, _per_side) for r in assign_spans(sp, rs)]
     else:
         regions = assign_spans(prim, regions)
     regions = split_disjoint_tables(regions)
