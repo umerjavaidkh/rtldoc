@@ -92,8 +92,12 @@ def glyphs_from_page(page: "fitz.Page", clip: tuple | None = None,
     # It's only reusable when no clip is requested -- a clipped call needs
     # its own, narrower extraction.
     if raw is None or clip is not None:
-        raw = page.get_text("rawdict", clip=fitz.Rect(clip) if clip else None,
-                            flags=fitz.TEXTFLAGS_RAWDICT | fitz.TEXT_PRESERVE_LIGATURES)
+        # Through primitives.rawdict, not page.get_text: a clipped call
+        # needs its own extraction, but it needs the SAME repairs -- going
+        # direct silently re-imported every defect they fix (confirmed:
+        # the '1'-for-space corruption reappeared inside clipped regions).
+        from .primitives import rawdict as _rawdict
+        raw = _rawdict(page, clip=clip)
     for block in raw["blocks"]:
         if block.get("type") != 0:
             continue

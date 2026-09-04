@@ -469,8 +469,9 @@ def _drop_symbol_font_letters(raw: dict) -> dict:
     return raw
 
 
-def rawdict(page: "fitz.Page") -> dict:
-    raw = page.get_text("rawdict", flags=_RAWDICT_FLAGS)
+def rawdict(page: "fitz.Page", clip=None) -> dict:
+    raw = page.get_text("rawdict", flags=_RAWDICT_FLAGS,
+                        clip=fitz.Rect(clip) if clip is not None else None)
     return _drop_symbol_font_letters(_fix_broken_space_glyphs(page, raw))
 
 

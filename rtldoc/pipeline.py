@@ -644,17 +644,24 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
         try:
             from . import geobidi
             if nested is not None:
-                # Rebuild lines per side as well. Region splitting alone is
-                # not enough: a geo line is built across the whole page, so
-                # one line can hold the inner page's heading AND the margin
-                # note beside it, and whichever region owns that line
-                # inherits both. Clipping is what actually keeps them apart.
+                # ONE extraction, partitioned by side. Clipping was tried
+                # and reverted: a clipped call surfaces glyphs the
+                # unclipped one drops -- including this document's hidden
+                # reversed text layers -- which showed up as 7 pages of
+                # duplicated text (excess up to 0.378 against
+                # page.get_text()). Splitting the spans and regions is
+                # what separates the two pages; the lines only need to
+                # follow that split, not be re-read.
                 nx0, ny0, nx1, ny1 = nested
-                pw, ph = prim.width, prim.height
-                geo_lines = (geobidi.page_lines(page, clip=(nx0, ny0, nx1, ny1))
-                             + [ln for ln in geobidi.page_lines(page, raw=raw)
-                                if not (nx0 <= (ln[0][0] + ln[0][2]) / 2 <= nx1
-                                        and ny0 <= (ln[0][1] + ln[0][3]) / 2 <= ny1)])
+                _all = geobidi.page_lines(page, raw=raw)
+
+                def _inner(ln) -> bool:
+                    bb = ln[0]
+                    cx = (bb[0] + bb[2]) / 2
+                    cy = (bb[1] + bb[3]) / 2
+                    return nx0 <= cx <= nx1 and ny0 <= cy <= ny1
+
+                geo_lines = [ln for ln in _all if _inner(ln)] + [ln for ln in _all if not _inner(ln)]
             else:
                 geo_lines = geobidi.page_lines(page, raw=raw)
         except Exception:
