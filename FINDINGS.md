@@ -452,3 +452,29 @@ d9a9d02  Require a heading to be shaped like one, not just set in a larger font
 
 Those 6 are a meaningful quality jump (headings 17.1% → 2.3%) and are
 release-worthy whenever you want v1.2.0.
+
+## Open: activity markers render on the wrong side (RTL)
+
+Reported by the user, seen throughout the book, not yet fixed.
+
+Numbered activity chips (1, 2, 3, ...) render flush LEFT in the HTML while
+the page places them on the RIGHT, which is where an RTL reader expects a
+list marker. The text blocks beside them are correct.
+
+What is known:
+
+- The markers are their own blocks (`role == "activity_marker"`), one per
+  chip, and their geometry is right: on p112 every chip sits at
+  x=446-464 on a 720pt page, i.e. to the RIGHT of the inner page's text
+  column (x=69-434). So this is a rendering problem, not a layout one.
+- A marker's text is a bare number. It contains no strong-RTL character,
+  so its resolved direction is LTR and it aligns to the left edge of its
+  container, unlike the `dir="rtl"` paragraphs around it.
+
+Likely fix: emit `dir="rtl"` (or an explicit right alignment) on the
+marker block the same way the paragraph blocks get it, rather than
+letting the direction be inferred from a digit. Check the same for any
+other block whose text is digits-only -- folios, table marker columns --
+since they will have inherited the same defect.
+
+Not attempted yet; noted for a later pass.
