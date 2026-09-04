@@ -515,7 +515,15 @@ def _nearest_caption(fig: "Block", blocks: list["Block"], max_chars: int = 120) 
             d *= 3
         if best is None or d < best_d:
             best, best_d = b, d
-    return best.text.strip().replace("\n", " ")[:max_chars] if best else ""
+    if best is None:
+        return ""
+    text = best.text.strip().replace("\n", " ")
+    # A caption is a short block of its own. Truncating a long paragraph to
+    # max_chars produced a "caption" that was simply the paragraph's first
+    # 120 characters, duplicated verbatim while the paragraph itself stayed
+    # in the output -- 20 pages of this book carried the same text twice.
+    # Judge the candidate by its OWN length, do not cut it down to fit.
+    return text if len(text) <= max_chars else ""
 
 
 def _link_activities(regions: list[Region]) -> None:
