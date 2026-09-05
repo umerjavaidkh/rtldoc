@@ -424,3 +424,106 @@ def tagged_tables(doc: "fitz.Document", resolve_text: bool = True) -> list[Tagge
                 for cell in row:
                     cell.text = "".join(lut.get(m, "") for m in cell.mcids).strip()
     return tables
+
+
+# --------------------------------------------------------------------------
+# declared reading order
+# --------------------------------------------------------------------------
+
+def reading_order_ranks(doc: "fitz.Document") -> dict[int, dict[int, int]]:
+    """{page index: {mcid: rank}} in the order the structure tree declares.
+
+    This is the one signal that beats geometry outright. Column detection,
+    however careful, infers reading order from where ink landed; a tagged file
+    *states* it. The tree's depth-first order is the logical reading order by
+    definition -- that is what /StructTreeRoot is for, and what a screen reader
+    follows -- so where it exists there is nothing to infer.
+
+    It generalises where geometry struggles: any number of columns, columns
+    that change count mid-page, sidebars, pull quotes, a footnote block that
+    belongs with text three columns away. None of those need a special case,
+    because the file already answered the question.
+
+    Returns {} for an untagged file, which is most of them -- roughly a third
+    of real-world PDFs carry usable tags, and LaTeX produces none at all -- so
+    this augments the geometric path and never replaces it.
+    """
+    cat = doc.pdf_catalog()
+    try:
+        kind, val = doc.xref_get_key(cat, "StructTreeRoot")
+    except Exception:
+        return {}
+    if kind == "null":
+        return {}
+    try:
+        root_xref = int(val.split()[0]) if kind == "xref" else None
+    except Exception:
+        return {}
+    if root_xref is None:
+        return {}
+
+    objs = Objects(doc)
+    root = objs.get(root_xref)
+    if not isinstance(root, dict):
+        return {}
+    pages = _pageno(doc)
+
+    ranks: dict[int, dict[int, int]] = {}
+    counter = 0
+    seen: set[int] = set()
+
+    def walk(node, page_hint: int | None, depth: int = 0) -> None:
+        nonlocal counter
+        if depth > 40 or not isinstance(node, dict):
+            return
+        pg = node.get("/Pg")
+        if isinstance(pg, Ref):
+            page_hint = pages.get(int(pg), page_hint)
+        kids = objs.resolve(node.get("/K"))
+        if kids is None:
+            return
+        for child in (kids if isinstance(kids, list) else [kids]):
+            child = objs.resolve(child)
+            if isinstance(child, int) and not isinstance(child, Ref):
+                if page_hint is not None:
+                    ranks.setdefault(page_hint, {}).setdefault(int(child), counter)
+                    counter += 1
+            elif isinstance(child, dict):
+                if child.get("/Type") == "/MCR":
+                    mc = child.get("/MCID")
+                    cpg = child.get("/Pg")
+                    p = pages.get(int(cpg), page_hint) if isinstance(cpg, Ref) else page_hint
+                    if isinstance(mc, int) and p is not None:
+                        ranks.setdefault(p, {}).setdefault(int(mc), counter)
+                        counter += 1
+                elif child.get("/Type") != "/OBJR":
+                    # guard against a tree that references a node twice
+                    key = id(child)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    walk(child, page_hint, depth + 1)
+
+    walk(root, None)
+    return ranks
+
+
+def declared_line_ranks(page: "fitz.Page", ranks: dict[int, int],
+                        tol: float = 15.0) -> list[tuple[tuple[float, float], int]]:
+    """[(page-space origin, rank)] for this page's tagged text operations.
+
+    Joins the structure tree's ranks to positions on the page, so a consumer
+    working in page coordinates (regions, blocks) can ask "what order did the
+    file declare for the text sitting here".
+    """
+    out = []
+    height = page.rect.height
+    for mcid, _tag, (px, py) in mcid_origins(page):
+        if mcid is None:
+            continue
+        rank = ranks.get(mcid)
+        if rank is None:
+            continue
+        # the tokenizer works in PDF space (y up); page geometry is y down
+        out.append(((px, height - py), rank))
+    return out

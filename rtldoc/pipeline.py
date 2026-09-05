@@ -26,6 +26,9 @@ from dataclasses import dataclass, field, asdict
 import fitz
 
 from . import arabic, visual
+from . import tags
+from .layout import column_bands as _column_bands, page_gutters as _page_gutters
+from .layout import recover_header_rows as _recover_header_rows
 from .layout import nested_page_rect, Region, assign_spans, group_by_line, order_regions, propose_regions, split_disjoint_tables
 from .primitives import PagePrimitives, Span, containment, extract_page, style_profile
 
@@ -306,6 +309,29 @@ def _table_grid(region: Region, owned: dict[int, list],
                 if bb[0] >= cx0 - 2.0 and bb[2] <= cx1 + 2.0
                 and bb[1] >= cy0 - 2.0 and bb[3] <= cy1 + 2.0]
 
+    # A line that reaches across a column rule belongs to no cell, and
+    # `_lines_in` -- which requires full containment -- discards it from both.
+    # On a bilingual table that is most of the content: the two languages sit
+    # side by side on a shared baseline, so line assembly welds them into one
+    # run spanning the whole table, and every cell keeps only whatever short
+    # fragment happened to fit. Confirmed real case: a Saudi labour-contract
+    # template where 8 of 40 lines spanned both columns and 73% of the Arabic
+    # was dropped.
+    #
+    # The table's own column rules are a column structure the file states
+    # outright, so they can be used the way a page gutter is: re-read the
+    # welded rows from each cell's own rectangle. Scoped to the rows that are
+    # actually welded, so a table whose lines already sit inside their cells
+    # is untouched.
+    _col_edges = sorted({round(c.bbox[0], 1) for c in region.cells} |
+                        {round(c.bbox[2], 1) for c in region.cells})
+
+    def _spans_columns(bb) -> bool:
+        inner = [x for x in _col_edges if bb[0] + 2.0 < x < bb[2] - 2.0]
+        return bool(inner)
+
+    _welded = any(_spans_columns(bb) for bb, _t in region_lines)
+
     for cell in region.cells:
         # Scoped to RTL cells: this is a bidi ordering bug, and the span
         # path is correct for LTR. Applied to every cell it re-rendered
@@ -315,6 +341,17 @@ def _table_grid(region: Region, owned: dict[int, list],
         rtl_cell = arabic.is_arabic("".join(sp.text for sp in (cell.spans or [])))
         if not cell_lines and rtl_cell:
             cell_lines = _lines_in(cell)
+        # Welded rows: re-read this cell from its own rectangle, so the text
+        # that a cross-column line took down with it comes back.
+        # Not gated on the cell being empty: a welded row leaves each cell
+        # holding whatever fragment happened to fit, so "has some lines" is
+        # exactly the damaged state, not evidence the cell is fine.
+        if _welded and _region_rtl and page is not None and rtl_cell:
+            try:
+                from . import geobidi as _gb
+                cell_lines = _gb.page_lines(page, clip=cell.bbox)
+            except Exception:
+                cell_lines = []
         if (not cell_lines and not (cell.spans or []) and page is not None
                 and region_lines and _region_rtl):
             # A narrow marker column can end up owning nothing: the row's
@@ -447,6 +484,84 @@ def _heading_shaped(region: Region, text: str = "", max_chars: int = 200,
     return len(lines) <= max_lines
 
 
+# A heading style is, by definition, a small minority of a page's text. Above
+# this share a style is the body, whatever it looks like.
+HEADING_STYLE_MAX_SHARE = 0.25
+# The style-contrast path is held to a much tighter shape than the size path.
+# Size is strong evidence on its own; "a different font" is not, so it has to
+# be paired with a shape that is unmistakably a label. Measured by eye on 24
+# emitted headings from arXiv papers, the false positives were nearly all
+# long-ish body fragments and author lines -- one line and a short measure
+# removes them while keeping "1 Introduction", "2.1 Software Engineering
+# Agents" and "المادة ( 14 )".
+HEADING_STYLE_MAX_CHARS = 80
+
+
+# A section label announces itself: a numbering prefix, or a word from the
+# structural lexicon of the document's language. Both are language-specific in
+# their tokens and identical in their function, which is why the lexicon is a
+# list rather than a rule.
+_SECTION_LEXICON = re.compile(
+    r"^\s*(?:"
+    r"المادة|الفصل|الباب|الفرع|الملحق|القسم|البند"                      # Arabic
+    r"|Article|Section|Chapter|Part|Annex|Appendix|Clause|Schedule"      # English
+    r"|Abstract|Introduction|Conclusion|References|Acknowledge?ments?"
+    r")\b", re.I | re.U)
+_SECTION_NUMBER = re.compile(r"^\s*(?:\(?\d+[.)]?)(?:\.\d+)*\s*[-–—:.]?\s*\S")
+
+
+def _announces_section(text: str) -> bool:
+    """Does this label say it is one -- by number or by structural word?
+
+    The style-contrast path needs corroboration. "A different font, and short"
+    describes a section head, but it equally describes an author line, a figure
+    label, a stray equation and half the fragments a two-column paper produces.
+    Measured by eye on 24 emitted headings, that path alone ran at ~42%
+    precision; requiring the text to announce itself keeps "1 Introduction",
+    "2.1 Software Engineering Agents" and "المادة ( 14 )" while dropping
+    "Josias Moukpe* Priyanka" and "GPT-5 ARG reaches 49.0%...".
+
+    Headings that announce nothing are still caught by the SIZE path, which
+    has its own evidence and does not need this.
+    """
+    t = (text or "").strip()
+    return bool(_SECTION_LEXICON.match(t) or _SECTION_NUMBER.match(t))
+
+
+def _looks_like_prose(text: str) -> bool:
+    """Sentence-shaped text is not a heading, however it is styled."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    if t.endswith((".", "،", "؛", ";")) and len(t) > 24:
+        return True
+    # a hyphenated line break is a wrapped paragraph, never a label
+    return t.endswith("-")
+
+
+def _page_style_census(page: PagePrimitives):
+    """(body style, {style: chars}, total chars) for one page, computed once.
+
+    The body is the style that sets most of the page's characters -- not the
+    smallest, not the lightest. Everything else is measured against it.
+    """
+    cache = getattr(page, "_rtldoc_style_census", None)
+    if cache is None:
+        tally: dict[str, int] = {}
+        for sp in page.spans:
+            n = len(sp.text.strip())
+            if n:
+                tally[sp.style_key] = tally.get(sp.style_key, 0) + n
+        total = sum(tally.values())
+        body = max(tally, key=tally.get) if tally else None
+        cache = (body, tally, total)
+        try:
+            page._rtldoc_style_census = cache
+        except Exception:
+            pass
+    return cache
+
+
 def _fallback_role(region: Region, page: PagePrimitives, text: str = "") -> str:
     if region.kind == "table":
         return "table"
@@ -472,7 +587,67 @@ def _fallback_role(region: Region, page: PagePrimitives, text: str = "") -> str:
         return "heading"
     if len(region.spans) <= 2 and (region.bbox[3] > page.height * 0.93):
         return "page_furniture"
+
+    # STYLE CONTRAST, for headings the size rule cannot see.
+    #
+    # Requiring a heading to be 35% larger than the body assumes headings are
+    # set bigger. Two real documents break that assumption in opposite
+    # directions: an Arabic Wikipedia print whose sub-headings are Bold at
+    # 1.16x body (under the bar, so all four on the page were missed), and a
+    # Saudi labour regulation whose 281 section heads are set in a LIGHTER,
+    # SMALLER face than the body it interrupts -- there, no size threshold in
+    # any direction can work.
+    #
+    # What both share, and what generalises, is contrast plus rarity: the
+    # heading is set in a style that is not the page's body style and that
+    # sets only a small share of its characters. Direction-agnostic by
+    # construction, so it holds whether headings are heavier or lighter,
+    # bigger or smaller. Shape is still required, so a caption or a footnote
+    # in its own face does not become a heading merely by being different.
+    body_style, tally, total = _page_style_census(page)
+    style = _dominant_style(region)
+    if (style and body_style and style != body_style and total
+            and tally.get(style, 0) <= total * HEADING_STYLE_MAX_SHARE
+            and _heading_shaped(region, text, max_chars=HEADING_STYLE_MAX_CHARS,
+                                max_lines=1)
+            and not _looks_like_prose(text)
+            and _announces_section(text)):
+        return "heading"
     return "paragraph"
+
+
+# Consecutive same-style headings this many deep stop being headings.
+HEADING_RUN_MAX = 3
+
+
+def _demote_heading_runs(blocks: list["Block"]) -> None:
+    """A run of same-style short blocks is a list or a table, not headings.
+
+    Headings punctuate body text; they do not stack. When a table goes
+    undetected its cells survive as short standalone blocks in the table's own
+    style, and every one of them then satisfies "short, and not the body
+    style" -- one Arabic Wikipedia page produced 34 headings, nearly all of
+    them cells of a crop-production table.
+
+    Demoting a run costs nothing when the run really is headings: a table of
+    contents reads as well in paragraphs. Leaving it costs the document its
+    entire outline, because a reader or a chunker cannot tell which of 34
+    headings are real.
+    """
+    i = 0
+    while i < len(blocks):
+        b = blocks[i]
+        if not (b.role or "").startswith("heading"):
+            i += 1
+            continue
+        j = i + 1
+        while (j < len(blocks) and (blocks[j].role or "").startswith("heading")
+               and blocks[j].style == b.style):
+            j += 1
+        if j - i > HEADING_RUN_MAX:
+            for k in range(i, j):
+                blocks[k].role = "paragraph"
+        i = j
 
 
 def _dedupe_blocks(blocks: list["Block"], quality: dict[int, int], min_len: int = 12) -> None:
@@ -611,6 +786,35 @@ def _link_activities(regions: list[Region]) -> None:
             r.activity = current
 
 
+def _declared_ranks(page: "fitz.Page") -> list[tuple[tuple[float, float], int]]:
+    """This page's declared reading order, or [] for an untagged file.
+
+    The structure tree is a whole-document object, so it is parsed once and
+    cached on the document -- doing it per page would be quadratic on a long
+    file. Any failure degrades to [] and the geometric path stands.
+    """
+    doc = getattr(page, "parent", None)
+    if doc is None:
+        return []
+    cache = getattr(doc, "_rtldoc_declared_ranks", None)
+    if cache is None:
+        try:
+            cache = tags.reading_order_ranks(doc)
+        except Exception:
+            cache = {}
+        try:
+            doc._rtldoc_declared_ranks = cache
+        except Exception:
+            pass
+    page_ranks = cache.get(page.number) if cache else None
+    if not page_ranks:
+        return []
+    try:
+        return tags.declared_line_ranks(page, page_ranks)
+    except Exception:
+        return []
+
+
 def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
                opts: arabic.NormalizeOptions | None = None,
                geometry_bidi: bool = True, visual_summary: bool = False) -> PageResult:
@@ -624,6 +828,31 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     raw = dedupe_duplicate_blocks(_rawdict(page))
 
     prim = extract_page(page, raw=raw)
+
+    # SPATIAL SEGMENTATION FIRST -- from word geometry, before any line exists.
+    #
+    # The recursive XY-cut splits the page on horizontal whitespace into blocks
+    # and looks for columns inside each block. A full-width table is therefore
+    # its own block, and the gutter belonging to the prose below it has no
+    # authority over it. Doing this before line assembly is what removes the
+    # ordering problem rather than managing it: every later stage -- line
+    # grouping, table detection, flow clustering, reading order -- consumes the
+    # same block structure instead of each deriving its own and disagreeing.
+    #
+    # Word boxes, never span boxes. A span bbox is a merged, padded run: on a
+    # Word-produced two-column page the same gutter measures 5pt through spans
+    # and 8pt through words, and those 3pt of phantom ink were enough to hide
+    # the column entirely.
+    try:
+        _words = [tuple(w[:4]) for w in page.get_text("words") if w[4].strip()]
+    except Exception:
+        _words = []
+    prim.page_words = _words
+    # Gutters stay EMPTY for the first layout pass. Until tables are known the
+    # projection cannot tell a table's column gap from a page gutter, so the
+    # first pass runs exactly as it always has -- unsplit lines, geometry only.
+    # The blocks and their gutters are derived once tables exist, below.
+
     result = PageResult(page=prim.number, columns=0, born_digital=prim.is_born_digital)
 
     if not prim.is_born_digital:
@@ -671,6 +900,10 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     if nested is not None:
         regions = _split_regions_at_nested(regions, nested)
     regions = split_disjoint_tables(regions)
+    # A table whose header row was styled differently often has that row left
+    # outside the detected region, which silently promotes the first data row
+    # to header and mis-keys every value. See layout.recover_header_rows.
+    _recover_header_rows([r for r in regions if r.kind == "table"], prim)
     # Column-boundary detection (inside order_regions) needs the page's
     # flowing prose, not a table's own cell text -- a table commonly
     # breaks out to the full content width regardless of the surrounding
@@ -680,7 +913,55 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     # case this fixes).
     table_bboxes = [r.bbox for r in regions if r.kind == "table"]
     flow_spans = [s for s in prim.spans if not any(containment(s.bbox, tb) > 0.5 for tb in table_bboxes)]
+
+    # THE PAGE'S COLUMNS, derived from prose alone.
+    #
+    # This has to happen here and not earlier, and the ordering is the whole
+    # design. Column bands and table detection are mutually dependent: a
+    # table's internal whitespace looks exactly like a gutter to a projection,
+    # while a real gutter looks exactly like a table's column gap. Every
+    # attempt to separate them by a threshold on the band itself failed --
+    # width, vertical coverage, line count, line-spacing regularity and
+    # fill ratio were all measured on both populations and all overlapped.
+    #
+    # The circularity breaks by ordering rather than by tuning. Tables are
+    # found first from UNSPLIT lines (bands are empty on that pass, so the
+    # detector behaves exactly as it always has). The bands are then computed
+    # from the spans those tables do not own, so a table's own gaps cannot
+    # manufacture a column. Only if that prose says the page really is
+    # multi-column is the layout re-derived, this time with lines that cannot
+    # span a gutter.
+    # THE LAYOUT, now that tables are known.
+    #
+    # Blocks are cut from all the page's words, so a full-width table is its
+    # own block; columns are projected from everything EXCEPT tables, so a
+    # table's internal gaps cannot invent one; and each gutter is then scoped
+    # to its whole block, so a table sitting inside a two-column body is still
+    # cut at the body's gutter. Re-deriving the layout once, here, is what lets
+    # the first pass stay geometry-only and still end up with column-correct
+    # lines.
+    if prim.page_words:
+        _g2 = _page_gutters(prim.page_words, prim.width, prim.height,
+                            exclude=table_bboxes)
+        if _g2:
+            prim.column_gutters = _g2
+            _xs = sorted({g[0] for g in _g2})
+            _lo = min(b[0] for b in prim.page_words)
+            _hi = max(b[2] for b in prim.page_words)
+            _edges = [_lo] + _xs + [_hi]
+            prim.column_bands = [(a, b) for a, b in zip(_edges, _edges[1:]) if b > a]
+            regions = propose_regions(prim)
+            regions = assign_spans(prim, regions)
+            if nested is not None:
+                regions = _split_regions_at_nested(regions, nested)
+            regions = split_disjoint_tables(regions)
+            table_bboxes = [r.bbox for r in regions if r.kind == "table"]
+            flow_spans = [s for s in prim.spans
+                          if not any(containment(s.bbox, tb) > 0.5 for tb in table_bboxes)]
+
     regions = order_regions(regions, prim.width, prim.height, rtl=is_rtl_page,
+                            declared=_declared_ranks(page),
+                            gutters=prim.column_gutters,
                             spans=flow_spans, nested=nested_page_rect(prim))
     result.columns = len({r.column for r in regions})
     _link_activities(regions)
@@ -699,7 +980,7 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
                 # what separates the two pages; the lines only need to
                 # follow that split, not be re-read.
                 nx0, ny0, nx1, ny1 = nested
-                _all = geobidi.page_lines(page, raw=raw)
+                _all = geobidi.page_lines(page, raw=raw, gutters=prim.column_gutters)
 
                 def _inner(ln) -> bool:
                     bb = ln[0]
@@ -709,7 +990,7 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
 
                 geo_lines = [ln for ln in _all if _inner(ln)] + [ln for ln in _all if not _inner(ln)]
             else:
-                geo_lines = geobidi.page_lines(page, raw=raw)
+                geo_lines = geobidi.page_lines(page, raw=raw, gutters=prim.column_gutters)
         except Exception:
             geo_lines = []
 
@@ -852,6 +1133,7 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     # from the others. Repeats WITHIN a single block are left alone (those are
     # genuine), so faithful source duplication survives while parser-side
     # double-emission does not.
+    _demote_heading_runs(result.blocks)
     _dedupe_blocks(result.blocks, quality)
 
     # Dedupe can empty a block outright, when every line it held was a

@@ -125,6 +125,19 @@ class PagePrimitives:
     # but they do carry the page's own physical structure -- see
     # layout.nested_page_rect.
     backgrounds: list[Fill] = field(default_factory=list)
+    # The page's column x-ranges, computed once from the raw spans and shared
+    # by every consumer. Empty means "not computed"; a single entry means a
+    # single-column page. Held here rather than recomputed per consumer so
+    # line grouping, table detection and reading order cannot disagree about
+    # where the columns are -- they did, and that disagreement was a bug.
+    column_bands: list[tuple[float, float]] = field(default_factory=list)
+    # Each gutter as (x, y_top, y_bottom): WHERE it separates columns, not just
+    # that it does. Mixed layouts (a full-width table over a two-column body)
+    # need the vertical extent -- see layout.page_gutters.
+    column_gutters: list[tuple[float, float, float]] = field(default_factory=list)
+    # Raw word boxes, kept so the column projection can be redone once tables
+    # are known without re-reading the page.
+    page_words: list[tuple[float, float, float, float]] = field(default_factory=list)
 
     @property
     def char_count(self) -> int:
@@ -190,6 +203,29 @@ def _document_ink_glyphs(doc: "fitz.Document") -> dict:
         _document_space_glyphs(doc)
         cached = getattr(doc, _INK_GLYPH_CACHE_ATTR, {}) or {}
     return cached
+
+
+# How many occurrences of a glyph the ink test looks at before deciding.
+# One is not enough: a single sample can land on a coloured band, a rule or a
+# tinted header, and the contrast it picks up there is the background's, not
+# the glyph's. Confirmed real case -- a Saudi HR regulation whose font maps
+# glyph 1 (the space) to alef: one unlucky sample classified the space as an
+# ink glyph, and the repair then rewrote every space in the document to alef,
+# leaving 32% of the Arabic on a page intact. Independent samples cannot all
+# land on colour, so a vote settles it without any per-document rule.
+_INK_SAMPLES = 5
+
+# Share of a glyph's occurrences the printable minority must reach before the
+# ink override fires. See the note at its use site.
+_INK_MINORITY_FRAC = 0.05
+
+
+def _glyph_has_ink_vote(doc: "fitz.Document", samples: list | None) -> bool:
+    """Majority ink test over several occurrences of the same glyph."""
+    if not samples:
+        return False
+    votes = [_glyph_has_ink(doc, s) for s in samples[:_INK_SAMPLES]]
+    return sum(votes) * 2 > len(votes)
 
 
 def _glyph_has_ink(doc: "fitz.Document", sample: tuple | None) -> bool:
@@ -267,7 +303,7 @@ def _document_space_glyphs(doc: "fitz.Document", min_samples: int = 5,
         return cached
 
     tallies: dict[tuple[str, int], list[int]] = {}
-    samples: dict[tuple[str, int], tuple[int, tuple]] = {}
+    samples: dict[tuple[str, int], list[tuple[int, tuple]]] = {}
     printable: dict[tuple[str, int], dict[int, int]] = {}
     for page in doc:
         try:
@@ -282,25 +318,37 @@ def _document_space_glyphs(doc: "fitz.Document", min_samples: int = 5,
                 t[1] += 1
                 if chr(code).isspace():
                     t[0] += 1
-                if key not in samples and (bbox[2] - bbox[0]) > 0.3:
-                    samples[key] = (page.number, tuple(bbox))
+                if (bbox[2] - bbox[0]) > 0.3 and len(samples.get(key, ())) < _INK_SAMPLES:
+                    samples.setdefault(key, []).append((page.number, tuple(bbox)))
                 if not chr(code).isspace():
                     printable.setdefault(key, {})
                     printable[key][code] = printable[key].get(code, 0) + 1
 
     voted = [k for k, (sp, tot) in tallies.items()
              if tot >= min_samples and sp / tot >= space_frac_thresh]
-    space_glyphs = frozenset(k for k in voted if not _glyph_has_ink(doc, samples.get(k)))
+    space_glyphs = frozenset(k for k in voted if not _glyph_has_ink_vote(doc, samples.get(k)))
     # A voted-space glyph that DOES draw ink is the opposite defect: the
     # majority reading is the corrupt one, and every occurrence decoded as
     # whitespace is a printable character that was silently deleted. Its
     # true character is the one the minority readings agree on.
+    # The minority printable reading must be a real SHARE of the glyph's
+    # occurrences, not merely five of them. An absolute floor cannot scale: on
+    # a document where the space glyph appears 1,648 times, six stray readings
+    # (0.36%) cleared it and the repair then rewrote every space in the file.
+    # Confirmed real case -- a Saudi HR regulation whose font decoded glyph 1
+    # as a space 1,642 times and as alef 6 times; the six won, and 68% of the
+    # Arabic on a page was destroyed.
+    #
+    # The two populations are 100x apart, so the threshold is not delicate:
+    # the bullet glyph this repair exists for read printable 34% of the time,
+    # against 0.36% here. Anything between 2% and 20% separates them.
     overrides: dict[tuple[str, int], str] = {}
     for k in voted:
         if k in space_glyphs or k not in printable:
             continue
         code, n = max(printable[k].items(), key=lambda kv: kv[1])
-        if n >= min_samples:
+        total = tallies[k][1] if k in tallies else n
+        if n >= min_samples and n >= total * _INK_MINORITY_FRAC:
             overrides[k] = chr(code)
     setattr(doc, _INK_GLYPH_CACHE_ATTR, overrides)
     setattr(doc, _SPACE_GLYPH_CACHE_ATTR, space_glyphs)

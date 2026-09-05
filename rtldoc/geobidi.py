@@ -195,7 +195,9 @@ def _group_rotated(glyphs: list[Glyph], tol_frac: float = 0.45) -> list[list[Gly
 
 
 def group_baselines(glyphs: list[Glyph], tol_frac: float = 0.45,
-                    col_gap_mult: float = 1.3) -> list[list[Glyph]]:
+                    col_gap_mult: float = 1.3,
+                    bands: list[tuple[float, float]] | None = None,
+                    gutters: list[tuple[float, float, float]] | None = None) -> list[list[Glyph]]:
     """Group glyphs into baselines by y-proximity, then split any baseline
     that contains an abnormally wide horizontal gap.
 
@@ -217,6 +219,19 @@ def group_baselines(glyphs: list[Glyph], tol_frac: float = 0.45,
     digits character-by-character ("2017" + "40,653" -> "24001,7653") once
     sorted by x. Same class of bug as layout.group_by_line's fix; this is
     the sibling implementation that hadn't gotten it yet.
+
+    `bands` supersedes the gap heuristic when the page's real column ranges
+    are known. The gap rule guesses at a gutter from one line's spacing, so it
+    is bounded by exactly the problem it is trying to solve: it must pick a
+    multiple of the font size big enough not to fire on a wide word gap, and
+    that lower bound (1.3x = 13pt on 10pt text) sits ABOVE the commonest real
+    gutter there is -- LaTeX's 10pt columnsep. No value of col_gap_mult
+    separates the two populations, because they overlap. Splitting at known
+    band boundaries instead is not a guess at all: the split point is a gutter
+    the page-level detector already proved empty over the full content height,
+    so it cannot be confused by wide word spacing, and it works for any number
+    of columns and any gutter width. The gap rule stays as the fallback for
+    callers with no band information (a single table cell, a test).
 
     col_gap_mult=1.3, not the original 1.5: a real 2-column WHO report's
     actual gutter measured 14.9947pt on 10pt body text -- 0.0053pt under
@@ -249,7 +264,7 @@ def group_baselines(glyphs: list[Glyph], tol_frac: float = 0.45,
     rotated = [g for g in glyphs if g.rotated]
     if rotated:
         horizontal = [g for g in glyphs if not g.rotated]
-        out = group_baselines(horizontal, tol_frac, col_gap_mult) if horizontal else []
+        out = group_baselines(horizontal, tol_frac, col_gap_mult, bands, gutters) if horizontal else []
         for col in _group_rotated(rotated, tol_frac):
             out.append(col)
         return out
@@ -269,12 +284,31 @@ def group_baselines(glyphs: list[Glyph], tol_frac: float = 0.45,
         lines.append([g])
         line_y.append(g.y)
 
+    multi = bool(gutters) or (bands is not None and len(bands) > 1)
+
+    def _band_index(g: Glyph) -> int:
+        cx = (g.x0 + g.x1) / 2
+        if gutters:
+            # count the gutters active at this glyph's own y that lie left of
+            # it -- a gutter outside its rows does not separate anything here
+            return sum(1 for gx, gy0, gy1 in gutters
+                       if gx <= cx and gy0 <= g.y <= gy1)
+        for i, (a, b) in enumerate(bands):
+            if a <= cx < b:
+                return i
+        return min(range(len(bands)),
+                   key=lambda i: abs(cx - (bands[i][0] + bands[i][1]) / 2))
+
     out: list[list[Glyph]] = []
     for ln in lines:
         ln = sorted(ln, key=lambda g: g.x0)
         cluster = [ln[0]]
         for prev, g in zip(ln, ln[1:]):
-            if g.x0 - prev.x1 > max(prev.size, g.size) * col_gap_mult:
+            if multi:
+                split = _band_index(g) != _band_index(prev)
+            else:
+                split = g.x0 - prev.x1 > max(prev.size, g.size) * col_gap_mult
+            if split:
                 out.append(cluster)
                 cluster = []
             cluster.append(g)
@@ -507,10 +541,16 @@ def line_to_text(line: list[Glyph], space_frac: float = 0.20) -> str:
 
 
 def page_lines(page: "fitz.Page", clip: tuple | None = None,
-               raw: dict | None = None) -> list[tuple[tuple, str]]:
-    """Return [(bbox, logical_text)] for every baseline, top to bottom."""
+               raw: dict | None = None,
+               bands: list[tuple[float, float]] | None = None,
+               gutters: list[tuple[float, float, float]] | None = None) -> list[tuple[tuple, str]]:
+    """Return [(bbox, logical_text)] for every baseline, top to bottom.
+
+    Pass `bands` (the page's column x-ranges) whenever they are known, so a
+    baseline is never allowed to span two columns."""
     out = []
-    for line in group_baselines(glyphs_from_page(page, clip, raw)):
+    for line in group_baselines(glyphs_from_page(page, clip, raw),
+                                bands=bands, gutters=gutters):
         if not line:
             continue
         bbox = (min(g.x0 for g in line), min(g.y - g.size for g in line),

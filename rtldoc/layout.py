@@ -25,6 +25,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Literal
 
+import statistics
+
 import numpy as np
 
 from .arabic import is_arabic
@@ -298,13 +300,30 @@ def _detect_table_in_cluster(cluster: list[Fill], min_rows: int, min_cols: int,
     # underline, say -- can each individually pass the coverage check above
     # while sharing no real relationship; requiring them to actually line up
     # is what tells a genuine grid apart from that kind of coincidence.
-    def _consistent(lines: list[tuple[float, float, float]], span: float, tol_frac: float = 0.15) -> bool:
+    def _consistent(lines: list[tuple[float, float, float]], span: float,
+                    tol_frac: float = 0.15, agree: float = 0.7) -> bool:
+        """Do these rules share an extent -- allowing for a few that don't?
+
+        Measured against the MEDIAN extent with a majority vote, not against
+        max-minus-min. A real table routinely has a rule or two that stop
+        short: a merged cell, a column ruled only in the body, a header band
+        drawn narrower than the grid. Under max-minus-min a single such rule
+        fails the whole table -- confirmed case, a 13x8 NIST table whose rules
+        clustered perfectly (the cluster bbox matched the table to the point)
+        and was thrown away because its right edges spread 48% against a 15%
+        bar. Two genuinely unrelated decorative rules still fail this, because
+        they have no dominant extent for a majority to agree on.
+        """
         if len(lines) <= 1:
             return True
         los = [a for _, a, _ in lines]
         his = [b for _, _, b in lines]
         tol = tol_frac * span
-        return (max(los) - min(los)) <= tol and (max(his) - min(his)) <= tol
+        mid_lo = statistics.median(los)
+        mid_hi = statistics.median(his)
+        ok = sum(1 for a, b in zip(los, his)
+                 if abs(a - mid_lo) <= tol and abs(b - mid_hi) <= tol)
+        return ok >= max(2, len(lines) * agree)
 
     if not _consistent(row_lines, span_x) or not _consistent(col_lines, span_y):
         return []
@@ -348,7 +367,198 @@ def _detect_table_in_cluster(cluster: list[Fill], min_rows: int, min_cols: int,
     return [table]
 
 
-def group_by_line(spans: list[Span], tol_frac: float = 0.5) -> list[list[Span]]:
+def column_bands(bboxes: list[Rect], page_width: float, page_height: float,
+                 min_gap: float | None = None) -> list[tuple[float, float]]:
+    """The page's column x-ranges as (x0, x1) pairs, ordered left to right.
+
+    One band means a single-column page, and every caller then behaves exactly
+    as it did before columns existed."""
+    b = _column_boundaries(bboxes, page_width, page_height, min_gap)
+    return [(b[i], b[i + 1]) for i in range(len(b) - 1)]
+
+
+def _block_split_gap(gaps: list[float], scale: float) -> float:
+    """How large a horizontal gap has to be to end one block and start another.
+
+    Not a constant multiple of the type size. Within a block the gaps between
+    lines cluster tightly around the leading; a block boundary is a gap that
+    stands OUT of that cluster. So the threshold is a robust outlier test on
+    the page's own gap distribution -- median + 3 MAD -- which adapts to the
+    document's leading instead of assuming one. Confirmed case: a page whose
+    block boundary was 10.6pt against within-block gaps of 5-8pt on 9pt type;
+    every fixed multiple either missed it or split the prose apart.
+
+    The floor is a full line height of clear space, and it is doing real work:
+    on a table-heavy page the gaps between table rows are tight AND uniform, so
+    the MAD is tiny and the outlier test alone would split every row into its
+    own band -- after which each row's X-projection reads the table's own
+    column gaps as page columns. Requiring at least one blank line before
+    calling something a block boundary is what keeps a table one block; the
+    outlier test only ever raises the bar above that, for documents set with
+    looser leading.
+    """
+    if len(gaps) < 4:
+        return scale * BLOCK_SPLIT_FRAC
+    med = statistics.median(gaps)
+    mad = statistics.median([abs(g - med) for g in gaps]) or 0.5
+    return max(scale * 1.0, med + 3.0 * mad)
+
+
+def _horizontal_bands(bboxes: list[Rect], scale: float
+                      ) -> list[tuple[list[Rect], float, float]]:
+    """Split a set of boxes on horizontal whitespace into stacked bands.
+
+    The Y half of an XY-cut. A band is a run of content with no full-width
+    horizontal gap inside it, which is exactly the unit within which a column
+    structure is constant: a banner, a full-width table, a block of prose.
+    """
+    if not bboxes:
+        return []
+    events = sorted(((b[1], b[3]) for b in bboxes))
+    seen = []
+    hi_scan = events[0][1]
+    for y0, y1 in events[1:]:
+        if y0 > hi_scan:
+            seen.append(y0 - hi_scan)
+        hi_scan = max(hi_scan, y1)
+    min_gap = _block_split_gap(seen, scale)
+    bands: list[tuple[float, float]] = []
+    lo, hi = events[0]
+    for y0, y1 in events[1:]:
+        if y0 - hi > min_gap:
+            bands.append((lo, hi))
+            lo, hi = y0, y1
+        else:
+            hi = max(hi, y1)
+    bands.append((lo, hi))
+    out = []
+    for y0, y1 in bands:
+        inside = [b for b in bboxes if (b[1] + b[3]) / 2 >= y0 - 1
+                  and (b[1] + b[3]) / 2 <= y1 + 1]
+        if inside:
+            out.append((inside, y0, y1))
+    return out
+
+
+def page_gutters(bboxes: list[Rect], page_width: float, page_height: float,
+                 min_gap: float | None = None, _depth: int = 0,
+                 exclude: list[Rect] | None = None
+                 ) -> list[tuple[float, float, float]]:
+    """Each column gutter as (x, y_top, y_bottom) -- WHERE it separates columns,
+    not merely that it does.
+
+    A page is rarely one layout all the way down. A paper puts a full-width
+    table or figure above two columns of prose; a report puts a banner over a
+    three-column body; a form alternates. A gutter found from the page as a
+    whole is real only over the rows where it is actually clear, and applying
+    it outside them cuts full-width content in half -- confirmed case: a
+    three-table arXiv page whose full-width Table 1 was sliced down the middle
+    by the gutter belonging to the prose two-thirds further down the page.
+
+    Carrying the vertical extent is what makes mixed layouts work without
+    special-casing them: a line is split at a gutter only when the line lies
+    inside that gutter's own rows.
+
+    Derived by RECURSIVE XY-CUT rather than by one projection over the whole
+    page. The page is first cut on horizontal whitespace into stacked bands --
+    banner, full-width table, prose -- and columns are then sought inside each
+    band independently. A gutter is therefore a property of the band that owns
+    it and has no authority outside it, which is what makes a full-width table
+    immune to the gutter of the prose beneath it. Each column is recursed into,
+    so a column containing its own sub-columns is handled by the same rule
+    rather than by a special case.
+
+    A global projection cannot express this: it has to answer "is there a
+    gutter on this page" with one number per x, and every mixed layout then
+    forces a choice between missing the gutter and cutting the full-width
+    content. Segmenting first removes the question.
+    """
+    if _depth > 3 or not bboxes:
+        return []
+    scale = _body_size(bboxes)
+    out: list[tuple[float, float, float]] = []
+
+    # Blocks are cut from ALL the content, so a full-width table forms its own
+    # block and the layout below it cannot reach across.
+    bands = _horizontal_bands(bboxes, scale)
+    for band, y0, y1 in bands:
+        # Columns are projected from PROSE only. A table's own column gaps are
+        # empty over its full height and are otherwise indistinguishable from a
+        # gutter -- width, coverage, line count, spacing regularity and fill
+        # ratio were each measured on both populations and each overlapped. So
+        # the table's words are withheld from the projection rather than
+        # separated from it by a threshold.
+        proj = band if not exclude else [
+            b for b in band
+            if not any(containment(b, ex) > 0.5 for ex in exclude)]
+        # A block that is mostly table gets no vote. Its handful of non-table
+        # words is usually just the caption, and projecting columns from a
+        # caption then applying them to the whole block slices the table it
+        # describes -- confirmed on a page whose two full-width tables were cut
+        # in half by a gutter found in "Table 1. Performance on video depth
+        # estimation. We follow the protocols of...".
+        if len(proj) < 8 or len(proj) < 0.5 * len(band):
+            continue
+        bounds = _column_boundaries(proj, page_width, page_height, min_gap)
+        if len(bounds) <= 2:
+            continue
+        # ...but the gutter is scoped to the WHOLE band, tables included. A
+        # column gutter is a property of the block it divides, so it applies
+        # throughout that block -- which is what lets a table wrongly spanning
+        # two columns be cut at the same gutter as the prose around it, even
+        # though the table contributed nothing to finding it.
+        # A column is a run of RUNNING TEXT, and running text takes many lines.
+        # Without this, any row-structured block whose fields happen to align --
+        # a table the detector missed, a table of contents, a definition list --
+        # is read as columns, and reading it column-major tears every row apart:
+        # the entry text ends up separated from its page number, the model name
+        # from its parameter count.
+        #
+        # Measured on 49 pages: blocks that were genuinely two-column prose had
+        # a median of 56 lines in their smaller column (p10 = 15); blocks that
+        # were row-structured had a median of 4 (p10 = 2). The populations
+        # separate cleanly, which is why this guard is a line count and not
+        # another geometric ratio.
+        rows = {}
+        for bx in band:
+            rows.setdefault(round(bx[1]), []).append(bx)
+        def _lines_between(lo: float, hi: float) -> int:
+            return sum(1 for _, bs in rows.items()
+                       if any(lo <= (b[0] + b[2]) / 2 < hi for b in bs))
+        if any(_lines_between(a, b) < MIN_COLUMN_LINES
+               for a, b in zip(bounds, bounds[1:])):
+            continue
+        for x in bounds[1:-1]:
+            out.append((x, y0, y1))
+        for a, b in zip(bounds, bounds[1:]):
+            sub = [bx for bx in band if a <= (bx[0] + bx[2]) / 2 < b]
+            if len(sub) < len(band):
+                out.extend(page_gutters(sub, page_width, page_height,
+                                        min_gap, _depth + 1, exclude))
+    return out
+
+
+def _split_index(x_center: float, gutters: list[tuple[float, float, float]],
+                 y: float) -> int:
+    """How many gutters, active at this y, lie left of x -- the piece of the
+    line this glyph belongs to."""
+    return sum(1 for gx, gy0, gy1 in gutters if gx <= x_center and gy0 <= y <= gy1)
+
+
+def _band_of(x_center: float, bands: list[tuple[float, float]]) -> int:
+    for i, (a, b) in enumerate(bands):
+        if a <= x_center < b:
+            return i
+    # Outside every band -- a margin note, a page number, a hanging bullet.
+    # Attach it to the nearest band rather than dropping it, so band
+    # assignment can never lose a span.
+    return min(range(len(bands)),
+               key=lambda i: abs(x_center - (bands[i][0] + bands[i][1]) / 2))
+
+
+def group_by_line(spans: list[Span], tol_frac: float = 0.5,
+                  bands: list[tuple[float, float]] | None = None,
+                  gutters: list[tuple[float, float, float]] | None = None) -> list[list[Span]]:
     """Group spans into visual lines by baseline proximity, top-to-bottom.
 
     Deliberately sequential-interval, not a hashed bucket key. A bucket key
@@ -364,6 +574,45 @@ def group_by_line(spans: list[Span], tol_frac: float = 0.5) -> list[list[Span]]:
     tolerance no wider than the smaller of the two font sizes involved,
     can't alias that way.
     """
+    if gutters:
+        # Split by gutter, scoped to the rows where each gutter actually holds,
+        # so full-width content above or below a columned block stays whole.
+        buckets: dict[int, list[Span]] = {}
+        for sp in spans:
+            cx = (sp.bbox[0] + sp.bbox[2]) / 2
+            cy = (sp.bbox[1] + sp.bbox[3]) / 2
+            buckets.setdefault(_split_index(cx, gutters, cy), []).append(sp)
+        out: list[list[Span]] = []
+        for i in sorted(buckets):
+            out.extend(group_by_line(buckets[i], tol_frac))
+        return out
+
+    if bands and len(bands) > 1:
+        # COLUMN AWARENESS. On a two-column page the left and right columns
+        # share baselines -- that is what "two columns" means -- so grouping by
+        # y alone welds the left column's line to the right column's line at
+        # the same height, yielding text that reads "...does not fully bound
+        # radio resources are allocated among DRBs...". Nothing downstream can
+        # undo it: by the time regions, tables and reading order are computed,
+        # the two columns are already one string. This was the single root
+        # cause behind a family of symptoms previously patched one at a time --
+        # see the historical notes in detect_borderless_tables,
+        # _detect_borderless_in_lines and parse_page, each of which describes
+        # working around "group_by_line has no column awareness".
+        #
+        # Lines come out band by band (each band internally top-to-bottom)
+        # rather than globally by y, because every consumer -- flow clustering,
+        # borderless-table detection, paragraph assembly -- wants one column's
+        # lines consecutively.
+        buckets: dict[int, list[Span]] = {}
+        for sp in spans:
+            buckets.setdefault(
+                _band_of((sp.bbox[0] + sp.bbox[2]) / 2, bands), []).append(sp)
+        out: list[list[Span]] = []
+        for i in sorted(buckets):
+            out.extend(group_by_line(buckets[i], tol_frac))
+        return out
+
     if not spans:
         return []
     ordered = sorted(spans, key=lambda s: (s.bbox[1] + s.bbox[3]) / 2)
@@ -910,6 +1159,15 @@ def detect_borderless_tables(prim: PagePrimitives, min_rows: int = 3, min_cols: 
     keeping only those an alignment supports across >= min_rows rows. Long
     (prose) spans never vote, so a wrapped sentence can't invent a column.
     """
+    # Bands are EMPTY on the first pass and prose-derived on the second (see
+    # parse_page). That ordering matters: a table's row is by definition a line
+    # spanning the table's own columns, so splitting lines at a table's
+    # internal gaps would make every row invisible. Splitting them at a PAGE
+    # gutter is the opposite -- required, or a two-column page welds the left
+    # column's prose into the right column's table and calls the result a row.
+    # Deriving the bands from prose only is what separates the two cases
+    # without a threshold: a table's own gaps cannot create a band, because a
+    # table's spans are not in the sample the bands are computed from.
     lines = group_by_line(prim.spans)
     # group_by_line groups purely by y-proximity, with NO column awareness
     # at all -- on a multi-column page, a "line" at a given height can mix
@@ -1972,6 +2230,147 @@ def _find_disjoint_column_split(cells: list[Region], max_collision_frac: float =
     return None
 
 
+# A recovered header row must sit within this multiple of the table's own row
+# height above it, and cover this share of its columns. Both are expressed
+# against the table, not in points, so the rule holds at any type size.
+HEADER_GAP_ROWS = 1.6
+HEADER_COL_COVER = 0.5
+
+
+def _cell_shape(text: str) -> tuple:
+    """Coarse character class of a cell, for comparing one row against another."""
+    t = text.strip()
+    return (bool(re.search(r"\d", t)),
+            t.isupper() and len(t) > 1,
+            0 if not t else (1 if len(t) <= 12 else (2 if len(t) <= 40 else 3)))
+
+
+def _rows_alike(row_a: list[Region], row_b: list[Region], region: Region,
+                frac: float = 0.6) -> bool:
+    """Do two table rows share a character shape, column for column?"""
+    def cells(row):
+        return {c.table_col: "".join(sp.text for sp in (c.spans or [])).strip()
+                for c in row}
+    a, b = cells(row_a), cells(row_b)
+    common = [k for k in a if k in b and (a[k] or b[k])]
+    if not common:
+        return False
+    same = sum(1 for k in common if _cell_shape(a[k]) == _cell_shape(b[k]))
+    return same >= max(1, len(common) * frac)
+
+
+def recover_header_rows(tables: list[Region], prim: PagePrimitives) -> None:
+    """Pull back a header row the rule clustering left outside the table.
+
+    A table's header is very often styled differently from its body -- shaded,
+    boxed, ruled with a heavier or a differently-drawn line -- and when that
+    styling changes how its rules cluster, the header row falls outside the
+    detected region. The first DATA row then becomes the header, and every
+    value in the table keys to the wrong column.
+
+    That failure is invisible in the text (every cell is extracted perfectly)
+    and total in meaning: measured on a hand-verified gold set, it is the
+    single largest table defect, worth 18.5 points of TableRecordMatch across
+    43 tables. Confirmed case: a 5-row questionnaire whose region began 13pt
+    below its own header, so "RQ1" became the column name for "RQ".
+
+    The recovery is geometric and needs no styling rule: look at the strip
+    immediately above the table, and take it only if its words line up with
+    the columns the table already has. Alignment with an existing grid is
+    strong evidence -- ordinary prose above a table does not land in its
+    column bands -- and it is what keeps a caption or a paragraph out.
+    """
+    if not prim.spans:
+        return
+    for region in tables:
+        if not region.cells:
+            continue
+        # Anchor on the first row that actually carries text. Rule clustering
+        # routinely leaves one or two empty slivers at the top of a table, and
+        # anchoring on those compares two blank rows and sizes the search band
+        # from a 2pt height.
+        by_row: dict[int, list[Region]] = {}
+        for cell in region.cells:
+            if cell.table_row is not None:
+                by_row.setdefault(cell.table_row, []).append(cell)
+        filled = [r for r in sorted(by_row)
+                  if any("".join(sp.text for sp in (c.spans or [])).strip()
+                         for c in by_row[r])]
+        if len(filled) < 2:
+            continue
+        top_row = filled[0]
+        first = by_row[top_row]
+        if len(first) < 2:
+            continue
+        # Only recover when the table's own first row reads as DATA. If row 0
+        # already looks unlike row 1 -- different character classes, different
+        # lengths -- it is the header and there is nothing missing; reaching
+        # above it then drags in the caption or the running head instead
+        # ("TABLE 3.28 Entries in...", "SECTION 3.3"). A header is missing
+        # precisely when row 0 is indistinguishable from the row beneath it,
+        # as "RQ1" is from "RQ2".
+        second = by_row[filled[1]]
+        if not _rows_alike(first, second, region):
+            continue
+        # Row height from ALL the table's rows, not just its top one: rule
+        # clustering can leave a 2pt sliver as row 0, and sizing the search
+        # band from that looks 3pt above the table and finds nothing. Floored
+        # by the page's own line height so a degenerate table still searches a
+        # sensible strip.
+        heights = [c.bbox[3] - c.bbox[1] for c in region.cells if c.bbox[3] > c.bbox[1]]
+        line_h = statistics.median(
+            [sp.bbox[3] - sp.bbox[1] for sp in prim.spans if sp.bbox[3] > sp.bbox[1]]
+        ) if prim.spans else 10.0
+        row_h = max(statistics.median(heights) if heights else 0.0, line_h)
+        y1 = min(c.bbox[1] for c in first)
+        y0 = y1 - row_h * HEADER_GAP_ROWS
+        x0, x1 = region.bbox[0], region.bbox[2]
+
+        band = [sp for sp in prim.spans
+                if sp.bbox[3] <= y1 + 1 and sp.bbox[1] >= y0 - 1
+                and sp.bbox[0] >= x0 - 4 and sp.bbox[2] <= x1 + 4
+                and sp.text.strip()]
+        if not band:
+            continue
+        # every column the strip actually lands in
+        hit = set()
+        for sp in band:
+            cx = (sp.bbox[0] + sp.bbox[2]) / 2
+            for c in first:
+                if c.bbox[0] - 2 <= cx <= c.bbox[2] + 2:
+                    hit.add(c.table_col)
+                    break
+        if len(hit) < max(2, len(first) * HEADER_COL_COVER):
+            continue
+        # A strip that also extends well beyond the table's own width is a
+        # caption or running text that happens to pass overhead, not a header.
+        if min(sp.bbox[0] for sp in band) < x0 - 6 or max(sp.bbox[2] for sp in band) > x1 + 6:
+            continue
+
+        new_top = min(sp.bbox[1] for sp in band)
+        header_cells = []
+        for c in first:
+            cell = Region(bbox=(c.bbox[0], new_top, c.bbox[2], y1),
+                          kind="table_cell", table_row=top_row - 1,
+                          table_col=c.table_col)
+            cell.spans = [sp for sp in band
+                          if c.bbox[0] - 2 <= (sp.bbox[0] + sp.bbox[2]) / 2 <= c.bbox[2] + 2]
+            header_cells.append(cell)
+        if not any(c.spans for c in header_cells):
+            continue
+        region.cells.extend(header_cells)
+        # Renumber so rows start at 0 again -- the grid builder sizes itself
+        # from max(table_row) and indexes directly, so a negative row would
+        # write the header into the last row instead of the first.
+        shift = -min(c.table_row for c in region.cells if c.table_row is not None)
+        if shift:
+            for c in region.cells:
+                if c.table_row is not None:
+                    c.table_row += shift
+        region.bbox = (region.bbox[0], new_top, region.bbox[2], region.bbox[3])
+        region.spans = list(region.spans) + list(band)
+
+
 def split_disjoint_tables(regions: list[Region]) -> list[Region]:
     """A page can lay two INDEPENDENT lists side by side purely to save
     space -- a table-of-contents' "Title .... page#" list beside an
@@ -2116,7 +2515,7 @@ def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.
     if rotated_orphans:
         rot = set(map(id, rotated_orphans))
         orphans = [s for s in orphans if id(s) not in rot]
-        for r in _cluster_flow(rotated_orphans):
+        for r in _cluster_flow(rotated_orphans, gutters=prim.column_gutters):
             r.kind = "rotated"
             regions.append(r)
 
@@ -2128,7 +2527,7 @@ def assign_spans(prim: PagePrimitives, regions: list[Region], thresh: float = 0.
     _merge_marker_columns(by_col)
     flows: list[Region] = []
     for col, spans in by_col.items():
-        for r in _cluster_flow(spans):
+        for r in _cluster_flow(spans, gutters=prim.column_gutters):
             r.column = col
             flows.append(r)
 
@@ -2207,11 +2606,35 @@ def _starts_with_list_marker(ls: list[Span], gap_ratio: float = 2.0) -> bool:
     return bool(label) and (label[0] == ":" or label[-1] == ":")
 
 
-def _cluster_flow(spans: list[Span], gap_mult: float = 1.6, size_ratio: float = 1.3) -> list[Region]:
+LINE_STYLE_PURITY = 0.85
+
+
+def _line_style(line: list[Span]) -> str | None:
+    """The style that sets nearly all of one line, or None if it is mixed.
+
+    Returning None for a mixed line is deliberate: a sentence with a bold term
+    inside it is not a style change, and treating it as one would split every
+    paragraph that emphasises a word.
+    """
+    tally: dict[str, int] = {}
+    for sp in line:
+        n = len(sp.text.strip())
+        if n:
+            tally[sp.style_key] = tally.get(sp.style_key, 0) + n
+    total = sum(tally.values())
+    if not total:
+        return None
+    key = max(tally, key=tally.get)
+    return key if tally[key] >= total * LINE_STYLE_PURITY else None
+
+
+def _cluster_flow(spans: list[Span], gap_mult: float = 1.6, size_ratio: float = 1.3,
+                  bands: list[tuple[float, float]] | None = None,
+                  gutters: list[tuple[float, float, float]] | None = None) -> list[Region]:
     """Greedy line-then-paragraph clustering for text outside any drawn box."""
     if not spans:
         return []
-    ordered = group_by_line(spans)
+    ordered = group_by_line(spans, bands=bands, gutters=gutters)
     ordered.sort(key=lambda ls: min(s.bbox[1] for s in ls))
     heights = [np.median([s.bbox[3] - s.bbox[1] for s in ls]) for ls in ordered]
     lead = float(np.median(heights)) if heights else 10.0
@@ -2221,6 +2644,14 @@ def _cluster_flow(spans: list[Span], gap_mult: float = 1.6, size_ratio: float = 
     prev_bottom = None
     prev_xrange = None
     prev_size = None
+    prev_style = None
+    # the style that sets most of these spans' characters
+    _tally: dict[str, int] = {}
+    for _sp in spans:
+        _n = len(_sp.text.strip())
+        if _n:
+            _tally[_sp.style_key] = _tally.get(_sp.style_key, 0) + _n
+    body_style = max(_tally, key=_tally.get) if _tally else None
     for ls, size in zip(ordered, sizes):
         top = min(s.bbox[1] for s in ls)
         x0, x1 = min(s.bbox[0] for s in ls), max(s.bbox[2] for s in ls)
@@ -2231,6 +2662,32 @@ def _cluster_flow(spans: list[Span], gap_mult: float = 1.6, size_ratio: float = 
         # blob purely because the gap check passed, and the whole thing then
         # gets mis-typed by whatever the biggest span in it happens to be.
         same_size = prev_size is None or max(size, prev_size) / min(size, prev_size) <= size_ratio
+        # A STYLE change is a semantic break the size ratio cannot see. A
+        # sub-heading set in the same family one step heavier and a sixth
+        # larger (9.3pt bold over 8pt regular, a ratio of 1.16) sails under
+        # any size threshold loose enough to be safe, and is then swallowed by
+        # the paragraph beneath it -- confirmed case, four sub-headings on one
+        # page absorbed into the following body text, invisible to every
+        # downstream role rule because they were never their own region.
+        #
+        # Only a WHOLE line in a different style counts. An inline bold run
+        # inside a sentence shares its line with body text and must not split
+        # a paragraph, so the line's dominant style has to own nearly all of
+        # it before the change is treated as structural.
+        # Only a transition ACROSS the body style counts. A run of lines that
+        # merely differ from the body -- a table's cells, a boxed sidebar, a
+        # caption block -- are all in one non-body style, and splitting each
+        # onto its own region turns every cell of an undetected table into a
+        # short standalone block that then reads as a heading. Confirmed: an
+        # Arabic Wikipedia page emitted 34 "headings", most of them table
+        # cells. A heading is a break BETWEEN body text and something else,
+        # so requiring one side of the transition to be the body style is
+        # what makes the signal mean what it is meant to mean.
+        style = _line_style(ls)
+        if style is None or prev_style is None or style == prev_style:
+            same_style = True
+        else:
+            same_style = body_style not in (style, prev_style)
         # A hanging-indent list marker (bullet, "1.", "a)") starting a line is
         # a new-item signal in its own right, independent of vertical gap: a
         # list's inter-item spacing is often barely larger than its intra-
@@ -2239,13 +2696,14 @@ def _cluster_flow(spans: list[Span], gap_mult: float = 1.6, size_ratio: float = 
         # merge two distinct items by a hair. A leading marker always starts
         # a new item regardless of how tight that gap happens to be.
         new_item = _starts_with_list_marker(ls)
-        if groups and prev_bottom is not None and (top - prev_bottom) < lead * gap_mult and overlaps and same_size and not new_item:
+        if groups and prev_bottom is not None and (top - prev_bottom) < lead * gap_mult and overlaps and same_size and same_style and not new_item:
             groups[-1].extend(ls)
         else:
             groups.append(list(ls))
         prev_bottom = max(s.bbox[3] for s in ls)
         prev_xrange = (x0, x1)
         prev_size = size
+        prev_style = style
 
     out = []
     for g in groups:
@@ -2259,19 +2717,77 @@ def _cluster_flow(spans: list[Span], gap_mult: float = 1.6, size_ratio: float = 
 # reading order
 # ---------------------------------------------------------------------------
 
+# A gutter is whitespace measured in points, but the thing it has to be told
+# apart from -- the gaps between words -- scales with the page's type size. A
+# constant threshold therefore cannot be right for both a 7pt newsletter and a
+# 14pt large-print report, and the constant that used to be here (10pt)
+# rejected the commonest two-column layout in existence: LaTeX's default
+# columnsep is 10pt, which after span-bbox padding and x-binning measures 8pt
+# of clear space -- just under the bar, on every two-column paper ever
+# submitted to arXiv.
+#
+# Measured over 74 two-column pages: real gutters ran 5-26pt (median 16),
+# within-line word gaps had a p95 of 6pt, and line height a median of 10pt.
+# Against the page's own line height the gutter is stable -- median 1.6x --
+# which is why the floor below is a fraction of it. The absolute floor only
+# guards degenerate input.
+GUTTER_MIN_FRAC = 0.55      # of the page's median line height
+GUTTER_MIN_ABS = 3.0        # points, when no usable line metric exists
+
+# A page column must be wide enough to SET RUNNING TEXT IN. This is what
+# separates a real column gutter from the whitespace between a table's
+# columns, which a projection cannot otherwise tell apart -- both are
+# vertical bands empty over the full height of the content around them.
+#
+# Measured on the PDF 1.7 reference's operator tables: the candidate bands
+# were 3-4 em wide (29-39pt at 9pt type), which holds about five characters.
+# A two-column arXiv page's bands were 26 em. Typographic convention puts a
+# readable measure at 20-35 em and even a narrow newspaper column near 12;
+# below roughly 8 em nothing is running text, so a band that narrow is a
+# table column, a label gutter or a margin, and its boundary is dropped.
+# A five-column layout on A4 still clears this comfortably (~10 em), so the
+# bar costs no real layout anything.
+MIN_COLUMN_EM = 8.0
+
+# Text lines each side of a gutter before it counts as a column boundary.
+MIN_COLUMN_LINES = 8
+
+# How much of the page's content height a gutter must stay clear for. A real
+# column gutter runs the height of the columns it separates; whitespace that
+# happens to line up for a few lines does not. Set low enough to admit the
+# common mixed layout -- a full-width table or figure over a two-column body,
+# where the gutter owns only the lower part of the page.
+GUTTER_MIN_HEIGHT_FRAC = 0.25
+
+# Horizontal whitespace, as a multiple of the median line height, that ends one
+# block and starts the next in the XY-cut. Comfortably above paragraph leading
+# (~0.2-0.6x) so prose is not shredded into bands, and well below the space a
+# real layout leaves around a full-width table or a banner.
+BLOCK_SPLIT_FRAC = 1.4
+
+
+def _gutter_floor(bboxes: list[Rect]) -> float:
+    """The narrowest vertical band this page may call a gutter."""
+    heights = [b[3] - b[1] for b in bboxes if b[3] > b[1]]
+    if not heights:
+        return GUTTER_MIN_ABS
+    return max(GUTTER_MIN_ABS, float(np.median(heights)) * GUTTER_MIN_FRAC)
+
+
 def _column_boundaries(bboxes: list[Rect], page_width: float, page_height: float,
-                       min_gap: float = 10.0, max_width_frac: float = 0.92,
-                       empty_thresh: float = 0.04) -> list[float]:
+                       min_gap: float | None = None, max_width_frac: float = 0.92,
+                       empty_thresh: float = 0.04,
+                       _want_extents: bool = False) -> list:
     """2D-aware whitespace-gutter finder.
 
-    min_gap=10 (not the wider value this used to have): a real column gutter
-    measured directly on a physics textbook came out at 18pt, and 2pt x-axis
-    binning quantizes that down further -- a width floor much above 10
-    starts rejecting genuine, if narrow, gutters. Width is the weaker of the
-    two guards anyway; `empty_thresh` (persistence across the page's full
-    content height) is what actually tells a real gutter apart from an
-    indent or list marker, since those are never empty for anywhere near the
-    full column height the way a genuine gutter is.
+    `min_gap=None` derives the width floor from the page's own typography (see
+    GUTTER_MIN_FRAC); passing a number overrides it, which the tests do to pin
+    specific behaviour. Width is the weaker of the two guards anyway;
+    `empty_thresh` (persistence across the page's full content height) is what
+    actually tells a real gutter apart from an indent or list marker, since
+    those are never empty for anywhere near the full column height the way a
+    genuine gutter is -- a single line's word gap has ink at every OTHER line,
+    so it scores a fill_frac near 1.0, not near 0.
 
     A 1D x-projection (ink present/absent per x, collapsing all y) is fooled
     two different ways: a single full-width element (a header, a footer, a
@@ -2307,7 +2823,9 @@ def _column_boundaries(bboxes: list[Rect], page_width: float, page_height: float
     parallel columns apart from a marker/indent gap.
     """
     if not bboxes:
-        return [0.0, page_width]
+        return [] if _want_extents else [0.0, page_width]
+    if min_gap is None:
+        min_gap = _gutter_floor(bboxes)
     content_left = min(b[0] for b in bboxes)
     content_right = max(b[2] for b in bboxes)
     content_width = max(content_right - content_left, 1.0)
@@ -2360,9 +2878,12 @@ def _column_boundaries(bboxes: list[Rect], page_width: float, page_height: float
         if typical_h:
             use = typical_h
     if not use:
-        return [0.0, page_width]
+        return [] if _want_extents else [0.0, page_width]
 
-    xres, yres = 2.0, 4.0
+    # 1pt x-bins, not 2pt: at 2pt resolution a 10pt gutter measures 8pt, and
+    # that rounding was itself half the reason the old floor rejected real
+    # columns. y stays coarse -- it only needs line resolution.
+    xres, yres = 1.0, 4.0
     xbins, ybins = int(page_width / xres) + 1, int(page_height / yres) + 1
     grid = np.zeros((ybins, xbins), dtype=bool)
     for x0, y0, x1, y1 in use:
@@ -2374,7 +2895,7 @@ def _column_boundaries(bboxes: list[Rect], page_width: float, page_height: float
     inked_rows = np.nonzero(grid.any(axis=1))[0]
     inked_cols = np.nonzero(grid.any(axis=0))[0]
     if inked_rows.size == 0 or inked_cols.size == 0:
-        return [0.0, page_width]
+        return [] if _want_extents else [0.0, page_width]
 
     content = grid[inked_rows[0]:inked_rows[-1] + 1, :]
     fill_frac = content.mean(axis=0)
@@ -2409,20 +2930,102 @@ def _column_boundaries(bboxes: list[Rect], page_width: float, page_height: float
     # is).
     min_run = max(2, round(line_bins * 1.8))
 
-    gaps, run = [], None
-    for i in range(inked_cols[0], inked_cols[-1] + 1):
-        if fill_frac[i] <= empty_thresh:
-            run = i if run is None else run
-        elif run is not None:
-            if (i - run) * xres >= min_gap:
-                if max_run(inked_cols[0], run) >= min_run and max_run(i, inked_cols[-1] + 1) >= min_run:
-                    gaps.append((run * xres, i * xres))
-            run = None
-    if run is not None and (inked_cols[-1] + 1 - run) * xres >= min_gap:
-        if max_run(inked_cols[0], run) >= min_run and max_run(inked_cols[-1] + 1, inked_cols[-1] + 1) >= min_run:
-            gaps.append((run * xres, (inked_cols[-1] + 1) * xres))
+    # A column is gutter-like where it carries a long CONTIGUOUS empty run --
+    # not where it is empty on average. The distinction is what admits mixed
+    # layouts: a page with a full-width table above two columns of prose has a
+    # gutter that is only clear over the lower part, so its average fill is
+    # high and an average-based test rejects it outright. The longest-run test
+    # subsumes the average one (a full-height gutter runs the whole way) and
+    # additionally reports WHERE the gutter holds, which is what stops a
+    # gutter belonging to the prose from slicing the table above it in half.
+    nrows = content.shape[0]
+    min_rows = max(2, int(nrows * GUTTER_MIN_HEIGHT_FRAC))
 
-    return [left] + [((a + b) / 2) for a, b in gaps] + [right + xres]
+    def longest_empty(i: int) -> tuple[int, int, int]:
+        col = ~content[:, i]
+        best = (0, 0, 0)
+        run = None
+        for r, v in enumerate(col):
+            if v:
+                run = r if run is None else run
+            elif run is not None:
+                if r - run > best[0]:
+                    best = (r - run, run, r)
+                run = None
+        if run is not None and nrows - run > best[0]:
+            best = (nrows - run, run, nrows)
+        return best
+
+    # The longest-run criterion is used ONLY when extents are wanted, i.e. by
+    # the XY-cut, which has already restricted the input to one band and so
+    # cannot mistake a table's gap for a page column. The page-wide callers
+    # keep the stricter average-emptiness test: relaxing it there let a
+    # table's own KEY/TYPE gap be numbered as a page column on an ordinary
+    # single-column page.
+    spans_by_col: dict[int, tuple[int, int, int]] = {}
+    gutterish = []
+    for i in range(inked_cols[0], inked_cols[-1] + 1):
+        best = longest_empty(i)
+        spans_by_col[i] = best
+        gutterish.append(best[0] >= min_rows if _want_extents
+                         else fill_frac[i] <= empty_thresh)
+
+    gaps, run = [], None
+    for k, is_gut in enumerate(gutterish + [False]):
+        i = inked_cols[0] + k
+        if is_gut:
+            run = i if run is None else run
+            continue
+        if run is None:
+            continue
+        if (i - run) * xres >= min_gap:
+            # the gutter's own rows: the overlap of its columns' empty runs
+            lo = max(spans_by_col[c][1] for c in range(run, i))
+            hi = min(spans_by_col[c][2] for c in range(run, i))
+            if hi - lo >= min_rows and \
+                    max_run(inked_cols[0], run) >= min_run and \
+                    max_run(i, inked_cols[-1] + 1) >= min_run:
+                gaps.append((run * xres, i * xres, lo, hi))
+        run = None
+
+    bounds = [left] + [((a + b) / 2) for a, b, _lo, _hi in gaps] + [right + xres]
+    bounds = _drop_narrow_bands(bounds, _body_size(bboxes) * MIN_COLUMN_EM)
+    if _want_extents:
+        # y-extent of each surviving gutter: the longest run of rows over which
+        # it is actually clear. See page_gutters.
+        top = inked_rows[0]
+        kept = set(bounds[1:-1])
+        return [(( a + b) / 2, (top + lo) * yres, (top + hi) * yres)
+                for a, b, lo, hi in gaps if (a + b) / 2 in kept]
+    return bounds
+
+
+def _body_size(bboxes: list[Rect]) -> float:
+    heights = [b[3] - b[1] for b in bboxes if b[3] > b[1]]
+    return float(np.median(heights)) if heights else 10.0
+
+
+def _drop_narrow_bands(bounds: list[float], min_width: float) -> list[float]:
+    """Dissolve any band too narrow to be a column of running text.
+
+    The narrowest band is merged into whichever neighbour is itself narrower,
+    which keeps the merge local -- a stray label gutter next to a wide body
+    column collapses into that column instead of restructuring the page.
+    Repeats until every surviving band clears the bar or only one is left.
+    """
+    bounds = list(bounds)
+    while len(bounds) > 2:
+        widths = [bounds[i + 1] - bounds[i] for i in range(len(bounds) - 1)]
+        j = min(range(len(widths)), key=lambda i: widths[i])
+        if widths[j] >= min_width:
+            break
+        if j == 0:
+            bounds.pop(1)                       # merge right
+        elif j == len(widths) - 1:
+            bounds.pop(len(bounds) - 2)         # merge left
+        else:
+            bounds.pop(j if widths[j - 1] <= widths[j + 1] else j + 1)
+    return bounds
 
 
 def _column_of(x_center: float, boundaries: list[float], rtl: bool = True) -> int:
@@ -2435,8 +3038,9 @@ def _column_of(x_center: float, boundaries: list[float], rtl: bool = True) -> in
 
 
 def detect_columns(regions: list[Region], page_width: float, page_height: float,
-                   min_gap: float = 10.0, rtl: bool = True,
-                   spans: list[Span] | None = None) -> int:
+                   min_gap: float | None = None, rtl: bool = True,
+                   spans: list[Span] | None = None,
+                   gutters: list[tuple[float, float, float]] | None = None) -> int:
     """Whitespace-projection column finder. Returns number of columns and
     tags each region with its column index (0 = read first).
 
@@ -2457,6 +3061,22 @@ def detect_columns(regions: list[Region], page_width: float, page_height: float,
     """
     if not regions:
         return 0
+    if gutters is not None:
+        # The SAME gutters the line assemblers used. Deriving columns here from
+        # a second projection is how a table's internal gap ended up numbered
+        # as a page column on a single-column page: the two derivations
+        # disagreed and nothing noticed. A gutter also only applies over its
+        # own rows, so a region above a columned block is column 0 whatever
+        # the block below it looks like.
+        ncols = 1
+        for r in regions:
+            yc = (r.bbox[1] + r.bbox[3]) / 2
+            active = [g for g in gutters if g[1] <= yc <= g[2]]
+            idx = sum(1 for gx, _, _ in active if gx <= r.x_center)
+            here = len(active) + 1
+            r.column = (here - 1 - idx) if rtl else idx
+            ncols = max(ncols, here)
+        return ncols
     boundaries = _column_boundaries([s.bbox for s in spans] if spans else [r.bbox for r in regions],
                                     page_width, page_height, min_gap)
     ncols = len(boundaries) - 1
@@ -2570,11 +3190,91 @@ def nested_page_rect(prim: PagePrimitives) -> Rect | None:
     return None
 
 
+def _reading_key(r: Region, gutters: list[tuple[float, float, float]],
+                 rtl: bool) -> tuple[float, int, float, float]:
+    """Sort key that reads a page the way a person does: block by block down
+    the page, and column by column inside a block.
+
+    Splitting the lines correctly is only half of reading order -- with the
+    columns separated but the regions still sorted by y, the output is a
+    perfectly clean left paragraph, then a clean right paragraph, then the next
+    left paragraph. Every block is right and the document is still unreadable.
+
+    A region that lies outside every gutter's rows -- a full-width heading,
+    a figure spanning the page, a footer -- sorts on its own y, so it lands
+    between the blocks it sits between instead of being forced into a column.
+    That is what makes mixed layouts read correctly without a special case.
+    """
+    yc = (r.bbox[1] + r.bbox[3]) / 2
+    active = [g for g in gutters if g[1] <= yc <= g[2]]
+    if not active:
+        return (r.bbox[1], 0, r.bbox[1], r.bbox[0])
+    band_top = min(g[1] for g in active)
+    idx = sum(1 for gx, _, _ in active if gx <= r.x_center)
+    col = (len(active) - idx) if rtl else idx
+    return (band_top, col, r.bbox[1], r.bbox[0])
+
+
+# A region must own this share of the declared ranks before the file's own
+# order is trusted over geometry. Below it the tagging is partial -- a few
+# decorative spans, or an artifact-heavy page -- and a partial order is worse
+# than none, because it reorders some regions and leaves others where they lay.
+DECLARED_ORDER_COVERAGE = 0.6
+
+
+def _apply_declared_order(ordered: list[Region],
+                          declared: list[tuple[tuple[float, float], int]]
+                          ) -> list[Region] | None:
+    """Reorder regions by the reading order the file itself declares.
+
+    Returns None when the tags do not cover enough of the page, leaving the
+    geometric order untouched. Ranks inside a region are reduced by MEDIAN, not
+    minimum: one stray early-ranked span (a footnote marker, a stray artifact)
+    should not drag a whole paragraph to the top.
+    """
+    if not declared or not ordered:
+        return None
+    per: list[list[int]] = []
+    for r in ordered:
+        x0, y0, x1, y1 = r.bbox
+        per.append([rank for (px, py), rank in declared
+                    if x0 <= px <= x1 and y0 <= py <= y1])
+    covered = sum(1 for v in per if v)
+    if covered < max(2, len(ordered) * DECLARED_ORDER_COVERAGE):
+        return None
+    # Regions with no declared rank keep their geometric neighbourhood: they
+    # inherit the rank of the nearest preceding region that has one, so an
+    # untagged figure stays where the layout put it instead of piling up first.
+    filled: list[float] = []
+    last = -1.0
+    for v in per:
+        if v:
+            last = float(statistics.median(v))
+        filled.append(last)
+    return [r for _, _, r in sorted(
+        ((rank, i, r) for i, (rank, r) in enumerate(zip(filled, ordered))),
+        key=lambda t: (t[0], t[1]))]
+
+
 def order_regions(regions: list[Region], page_width: float, page_height: float, rtl: bool = True,
                   spans: list[Span] | None = None,
-                  nested: Rect | None = None) -> list[Region]:
-    detect_columns(regions, page_width, page_height, rtl=rtl, spans=spans)
-    ordered = rtl_xy_cut(regions, rtl=rtl)
+                  nested: Rect | None = None,
+                  declared: list[tuple[tuple[float, float], int]] | None = None,
+                  gutters: list[tuple[float, float, float]] | None = None) -> list[Region]:
+    detect_columns(regions, page_width, page_height, rtl=rtl, spans=spans,
+                   gutters=gutters)
+    if gutters:
+        ordered = sorted(regions, key=lambda r: _reading_key(r, gutters, rtl))
+    else:
+        ordered = rtl_xy_cut(regions, rtl=rtl)
+    # An explicit declaration beats an inference. Where the file ships a
+    # structure tree, its order is the answer -- for any column count, for
+    # sidebars, for a layout that changes shape halfway down the page -- and
+    # geometry only has to cover the untagged majority.
+    if declared:
+        by_tags = _apply_declared_order(ordered, declared)
+        if by_tags is not None:
+            ordered = by_tags
     if nested is not None:
         # Emit the nested page's own content as one contiguous run, and the
         # surrounding page as another, instead of interleaving the two by
