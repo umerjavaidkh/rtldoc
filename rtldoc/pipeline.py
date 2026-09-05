@@ -438,8 +438,11 @@ def _region_words(page, bbox) -> list:
 PAGE_TABLE_MIN_SCORE = 0.80   # judge score before a rule-less page gets a table
 PAGE_TABLE_MIN_ROWS = 4
 PAGE_TABLE_MIN_COLS = 2
-PAGE_TABLE_MAX_COLS = 8
 PAGE_TABLE_MIN_FILL = 0.60
+# A page-level table must be numeric: that is what separates a statistics
+# table from prose sliced into columns.
+PAGE_TABLE_MIN_NUMERIC = 0.30
+_NUMERIC_CELL = re.compile(r"^[\d,.\-%()\s]+$")
 
 
 def _page_level_table(page, result) -> None:
@@ -467,17 +470,21 @@ def _page_level_table(page, result) -> None:
     cells = [c for r in grid for c in r]
     filled = [c for c in cells if c and c.strip()]
     fill = len(filled) / max(len(cells), 1)
+    numeric = (sum(1 for c in filled if _NUMERIC_CELL.match(c.strip()))
+               / max(len(filled), 1))
     if (getattr(_projection_grid, "last_score", 0.0) < PAGE_TABLE_MIN_SCORE
             or len(grid) < PAGE_TABLE_MIN_ROWS
             or ncols < PAGE_TABLE_MIN_COLS
-            or ncols > PAGE_TABLE_MAX_COLS
-            or fill < PAGE_TABLE_MIN_FILL):
+            or fill < PAGE_TABLE_MIN_FILL
+            or numeric < PAGE_TABLE_MIN_NUMERIC):
         # Prose shattered into one word per column passes the judge -- it
         # scores well on type purity and on spans-per-cell, which the judge
-        # weights double -- and comes back as a 20-column grid two thirds
-        # empty. A real table fills its cells and does not have twenty of
-        # them. Confirmed on the sample-500kb fixture, whose body text became
-        # ['', '', 'Sample', '', '', 'PDF', '', '-', '', 'Page', '1', 'of'...].
+        # weights double. What separates it from a statistical table is not
+        # SHAPE but CONTENT: measured, the sample-500kb fixture's body text
+        # gives a 54x20 grid that is 0% numeric, while a real rule-less
+        # yearbook table (2022 Saudi p71) gives 39x15 at 70% numeric. An
+        # earlier column cap of 8 rejected that real table for being wide,
+        # which statistical tables legitimately are.
         return
     covered = {arabic.normalize(c)[0] for r in grid for c in r if c and c.strip()}
     if not covered:
