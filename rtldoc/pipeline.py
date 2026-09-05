@@ -381,6 +381,7 @@ def _projection_grid(page, bbox):
         res = _tr.reconstruct_table_html(lines)
         if not res:
             return None
+        _projection_grid.last_score = res[1]
         import html as _h
         import re as _re
         grid = []
@@ -433,6 +434,60 @@ def _region_words(page, bbox) -> list:
             if len(w) > 1:
                 out.append(w)
     return out
+
+PAGE_TABLE_MIN_SCORE = 0.80   # judge score before a rule-less page gets a table
+PAGE_TABLE_MIN_ROWS = 4
+PAGE_TABLE_MIN_COLS = 2
+PAGE_TABLE_MAX_COLS = 8
+PAGE_TABLE_MIN_FILL = 0.60
+
+
+def _page_level_table(page, result) -> None:
+    """Recover a table on a page that draws no rules at all.
+
+    detect_tables reads a grid from stroked rules, so a page with none yields
+    no table REGION -- and the projection fallback inside _table_grid never
+    runs, because _table_grid is only called for a region that exists. Whole
+    statistical yearbooks are set this way: page 162 of the 2022 Saudi
+    yearbook has zero rules, we emitted nothing, and the reference found a
+    16x2 table there. `table_missed` fires 852 times across the Gulf corpus.
+
+    Guarded hard, because the alternative failure is inventing tables out of
+    prose: the page must already have no table, and the reconstruction's own
+    judge -- column type purity, compound-cell penalty, fill, header agreement
+    -- must clear PAGE_TABLE_MIN_SCORE on a grid of real size.
+    """
+    if any(b.table_grid for b in result.blocks) or not result.born_digital:
+        return
+    _projection_grid.last_score = 0.0
+    grid = _projection_grid(page, tuple(page.rect))
+    if not grid:
+        return
+    ncols = max(len(r) for r in grid)
+    cells = [c for r in grid for c in r]
+    filled = [c for c in cells if c and c.strip()]
+    fill = len(filled) / max(len(cells), 1)
+    if (getattr(_projection_grid, "last_score", 0.0) < PAGE_TABLE_MIN_SCORE
+            or len(grid) < PAGE_TABLE_MIN_ROWS
+            or ncols < PAGE_TABLE_MIN_COLS
+            or ncols > PAGE_TABLE_MAX_COLS
+            or fill < PAGE_TABLE_MIN_FILL):
+        # Prose shattered into one word per column passes the judge -- it
+        # scores well on type purity and on spans-per-cell, which the judge
+        # weights double -- and comes back as a 20-column grid two thirds
+        # empty. A real table fills its cells and does not have twenty of
+        # them. Confirmed on the sample-500kb fixture, whose body text became
+        # ['', '', 'Sample', '', '', 'PDF', '', '-', '', 'Page', '1', 'of'...].
+        return
+    covered = {arabic.normalize(c)[0] for r in grid for c in r if c and c.strip()}
+    if not covered:
+        return
+    host = max((b for b in result.blocks if b.text and not b.table_grid),
+               key=lambda b: len(b.text), default=None)
+    if host is None:
+        return
+    host.table_grid = grid
+    host.role = "table"
 
 def _table_grid(region: Region, owned: dict[int, list],
                 opts: arabic.NormalizeOptions, fills=None,
@@ -1438,6 +1493,10 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
             result.visual = None
 
     _strip_repeated_activity_number(result.blocks)
+    try:
+        _page_level_table(page, result)
+    except Exception:
+        pass
     return result
 
 
