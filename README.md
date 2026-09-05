@@ -32,7 +32,10 @@ and vector tables.
 
 ## Proven at scale
 
-Tested on **119 PDFs / 13,557 pages** it never saw during development — an
+Tested on **119 PDFs / 13,557 pages** it never saw during development, plus a
+separate **18-document / 2,283-page Gulf corpus** (Saudi and UAE statistical
+yearbooks, labour regulations, HR policy and service manuals) used as the
+standing regression set — an
 Arabic teacher's guide, two SEC 10-Ks, 96+ arXiv papers (15 fields), 5 OpenStax
 physics/chemistry/calculus textbooks (figures, geometry, exercises), the
 3,130-page PostgreSQL 18 manual (deeply-nested reference tables, code blocks),
@@ -56,6 +59,67 @@ borderless financial statement — where the whole point is a hard table:
 
 Everything is reproducible in [`eval/`](eval/) (harnesses, arXiv manifest,
 saved reports).
+
+## Measured against other parsers
+
+Not claims — scores on the same pages, with the harnesses in [`eval/`](eval/).
+
+**Tables**, on 43 hand-verified tables (`eval/ragbench/gold/gold.json`), scored
+with ParseBench's TableRecordMatch:
+
+| | score | tables it returns nothing for |
+|---|---:|---:|
+| **rtldoc** | **0.625** | 9 |
+| PyMuPDF `find_tables()` | 0.273 | 19 |
+| Marker's projection alone | 0.356 | 4 |
+| rtldoc + projection as fallback | **0.646** | 4 |
+
+**Arabic**, rtldoc against [Marker](https://github.com/datalab-to/marker) on
+the same 297-page Saudi statistical yearbook:
+
+| | Marker | rtldoc |
+|---|---:|---:|
+| Arabic words extracted | 12,902 | **17,677** |
+| Latin words extracted | 11,459 | **18,002** |
+| tatweel (kashida) left in text | 2,846 | **0** |
+| broken lam-alef ligatures | 1,078 | **11** |
+
+The last two rows are the ones that matter for retrieval: Marker's output
+*looks* right on screen, but `العـاج` will never match a query for `العلاج`,
+and `االنتقال` never matches `الانتقال`. Thousands of words silently
+unsearchable. On a different file (a Saudi labour regulation) Marker's Arabic
+came out reversed entirely — 289 of rtldoc's 300 commonest words appeared
+letter-reversed — so its RTL handling is font-dependent rather than absent.
+
+**Headings** are the honest exception. Scored on 72 hand-adjudicated cases,
+rtldoc and DocLayout-YOLO are a statistical dead heat — 57/72 each, McNemar
+p = 1.0. Four attempts at improving heading detection have failed, the last
+one by fitting weights on the headings PDFs declare in `/H1../H6`
+(`eval/heading_fit.py`). The blocker is measured and it is labels, not
+features: ten documents in the corpus carry a structure tree, yielding 149
+positives of which 137 come from one file.
+
+## What breaks in Arabic PDFs, and why geometry finds it
+
+Three defects found by measurement, each invisible to a layout model because
+none of them is a layout problem:
+
+- **Chrome print-to-PDF stacks a hidden copy of every letter.** The Wikipedia
+  print stylesheet, exported through Chrome, emits each Arabic letter a second
+  time with no advance, all glyphs piled on one x. They draw nothing but sort
+  into the line by position, welding glued letters onto the front of it:
+  `علملوثةلعرقيحدُيطلق اسم علم الوراثة` for `ُيطلق اسم علم الوراثة`. Between
+  42% and 55% of lines in the worst files, 12% of the stratum's text.
+  Detected by *stacking*, not by zero width — many fonts render the lam-alef
+  ligature as one glyph whose alef component has no advance, and filtering on
+  width alone turns `الُجْغَرافّية` into `الَُْافّة`.
+- **Symbol-font bullets arrive as Private Use codepoints.** U+F0B7 is a
+  bullet in Adobe's Symbol encoding and tofu everywhere else; 134 of them in
+  one UAE service manual.
+- **Cell text cut at cell boundaries.** Clipping a rectangle to read a table
+  cell makes MuPDF *cut* every line crossing the edge, and the offcuts land in
+  the neighbouring cell. Lines are assigned to the cell containing their
+  centre instead: a line belongs to one cell, it is never divided.
 
 ## Use it
 
@@ -111,6 +175,16 @@ plus structured JSON, or a self-contained HTML page per PDF page.
   no Python package required). Word-level positioning, not this repo's
   glyph-exact reading order; a page with no tesseract installed just gets
   no blocks, as before.
+- **Heading detection is the weak axis: 58.6%** on the Gulf corpus, and four
+  attempts to improve it have failed. See above -- the blocker is labelled
+  data, not the algorithm, and saying so is more useful than a fifth attempt.
+- Table *scores* are harder to trust than table output. The RAGBench TABLE
+  axis derives its ground truth from another detector, and a 60-case hand
+  audit found that reference's own grid wrong on 28% of its detections. Two
+  measurement bugs in it were fixed (records keyed by a header that a
+  continuation table does not have; truth keeping empty columns the prediction
+  drops) and the axis moved 9.4% -> 20.5% on unchanged parser output. The
+  number worth quoting is the 43 hand-verified tables, not that axis.
 - Best semantic typing needs a one-time per-publisher style map (~20 min).
 - Diagram detection reconstructs simple box-and-arrow flowcharts reliably;
   dense multi-level diagrams (deep tree/org-chart hierarchies with many
