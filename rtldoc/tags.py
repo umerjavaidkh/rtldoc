@@ -527,3 +527,81 @@ def declared_line_ranks(page: "fitz.Page", ranks: dict[int, int],
         # the tokenizer works in PDF space (y up); page geometry is y down
         out.append(((px, height - py), rank))
     return out
+
+
+def tagged_headings(doc: "fitz.Document") -> list[tuple[int, int, list[int]]]:
+    """Every heading the file DECLARES, as (page, level, mcids).
+
+    /H1../H6 and /Title in the structure tree are the producer's own statement
+    that a run of text is a heading, at a stated level. That makes them the one
+    heading ground truth that is independent of any geometry a parser might
+    use -- font size, weight, spacing or lexicon -- which is exactly what a
+    benchmark needs. Deriving heading truth from the same signals the parser
+    uses would measure agreement, not correctness.
+
+    Returns [] for an untagged file.
+    """
+    cat = doc.pdf_catalog()
+    try:
+        kind, val = doc.xref_get_key(cat, "StructTreeRoot")
+    except Exception:
+        return []
+    if kind == "null":
+        return []
+    try:
+        root_xref = int(val.split()[0]) if kind == "xref" else None
+    except Exception:
+        return []
+    if root_xref is None:
+        return []
+    objs = Objects(doc)
+    root = objs.get(root_xref)
+    if not isinstance(root, dict):
+        return []
+    pages = _pageno(doc)
+    out: list[tuple[int, int, list[int]]] = []
+    seen: set[int] = set()
+
+    def mcids_under(node, into: list[int], depth: int = 0) -> None:
+        if depth > 8 or not isinstance(node, dict):
+            return
+        kids = objs.resolve(node.get("/K"))
+        if kids is None:
+            return
+        for c in (kids if isinstance(kids, list) else [kids]):
+            c = objs.resolve(c)
+            if isinstance(c, int) and not isinstance(c, Ref):
+                into.append(int(c))
+            elif isinstance(c, dict):
+                if c.get("/Type") == "/MCR":
+                    m = c.get("/MCID")
+                    if isinstance(m, int):
+                        into.append(int(m))
+                elif c.get("/Type") != "/OBJR":
+                    mcids_under(c, into, depth + 1)
+
+    def walk(node, page_hint, depth: int = 0) -> None:
+        if depth > 40 or not isinstance(node, dict) or id(node) in seen:
+            return
+        seen.add(id(node))
+        pg = node.get("/Pg")
+        if isinstance(pg, Ref):
+            page_hint = pages.get(int(pg), page_hint)
+        s = node.get("/S")
+        if isinstance(s, str) and (s in ("/Title", "/H") or
+                                   (len(s) == 3 and s.startswith("/H") and s[2].isdigit())):
+            mc: list[int] = []
+            mcids_under(node, mc)
+            if mc and page_hint is not None:
+                level = 1 if s in ("/Title", "/H") else int(s[2])
+                out.append((page_hint, level, mc))
+        kids = objs.resolve(node.get("/K"))
+        if kids is None:
+            return
+        for c in (kids if isinstance(kids, list) else [kids]):
+            c = objs.resolve(c)
+            if isinstance(c, dict) and c.get("/Type") not in ("/MCR", "/OBJR"):
+                walk(c, page_hint, depth + 1)
+
+    walk(root, None)
+    return out
