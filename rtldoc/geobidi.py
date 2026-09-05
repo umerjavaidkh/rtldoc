@@ -126,52 +126,6 @@ def glyphs_from_page(page: "fitz.Page", clip: tuple | None = None,
     return out
 
 
-ZERO_ADVANCE = 0.1
-ZERO_RUN_MIN = 3
-
-
-def _drop_zero_advance_letters(glyphs: list["Glyph"]) -> list["Glyph"]:
-    """Drop LETTERS drawn with no advance -- they render nothing.
-
-    Chrome's print-to-PDF (and the Wikipedia print stylesheet through it) emits
-    a second, zero-width copy of each Arabic letter alongside the one it
-    actually draws. The copies are invisible on the page, carry no advance, and
-    sort by x into the middle of the real run, so a line comes out as its own
-    text with a run of glued letters welded to the front:
-
-        زero-width : غسطسمننفسلسنةكلفلرئيسلعرقيفؤمعصوحيدلعباجلتشكيلحكومةجديدفي
-        real       : للحشد الشعبي مواطنون من السنة
-
-    Measured on arwiki_iraq: 2012 of 12140 glyphs, 17% of the document.
-
-    Scoped to letters. Arabic diacritics are legitimately zero-width -- a
-    fatha, a shadda and every other harakat carries no advance by definition --
-    so combining marks (category M*) are kept, and so is anything that is not
-    a letter, since punctuation and controls are handled elsewhere.
-    """
-    def _zero(g) -> bool:
-        return ((g.x1 - g.x0) < ZERO_ADVANCE and bool(g.c)
-                and unicodedata.category(g.c)[0] == "L")
-
-    # Only a RUN of them is the duplicate layer. An isolated zero-advance
-    # letter is the alef of a lam-alef ligature, which many fonts render as a
-    # single glyph with the alef carrying no advance -- dropping those turned
-    # "الأول" into "الول" and "البلاد" into "البلد".
-    order = sorted(range(len(glyphs)), key=lambda i: (glyphs[i].y, glyphs[i].x0))
-    drop = set()
-    run: list[int] = []
-    for i in order:
-        if _zero(glyphs[i]):
-            run.append(i)
-        else:
-            if len(run) >= ZERO_RUN_MIN:
-                drop.update(run)
-            run = []
-    if len(run) >= ZERO_RUN_MIN:
-        drop.update(run)
-    out = [g for i, g in enumerate(glyphs) if i not in drop]
-    return out or glyphs
-
 def _drop_shadow_glyphs(glyphs: list["Glyph"]) -> list["Glyph"]:
     """Remove a duplicated text layer drawn as a drop shadow / double strike.
 
@@ -292,7 +246,7 @@ def group_baselines(glyphs: list[Glyph], tol_frac: float = 0.45,
     """
     if not glyphs:
         return []
-    glyphs = _drop_zero_advance_letters(_drop_shadow_glyphs(glyphs))
+    glyphs = _drop_shadow_glyphs(glyphs)
 
     # Rotated (90-degree) text has to be grouped on its OWN axis. Every step
     # here reasons in page coordinates and assumes horizontal text: a line is
