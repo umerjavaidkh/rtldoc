@@ -930,7 +930,17 @@ def extract_page(page: "fitz.Page", drop_white_fills: bool = True,
                     )
                 )
 
-    for d in page.get_drawings():
+    _all_drawings = page.get_drawings()
+    # Filled, non-white rectangles big enough to be a background band. A white
+    # line lying inside one of these is drawn ON it, and is therefore visible.
+    _dark_backdrops = [
+        (dd["rect"].x0, dd["rect"].y0, dd["rect"].x1, dd["rect"].y1)
+        for dd in _all_drawings
+        if dd.get("type") in ("f", "fs") and dd.get("fill") is not None
+        and not _near_white(dd.get("fill"))
+        and dd["rect"].width > 20 and dd["rect"].height > 3
+    ]
+    for d in _all_drawings:
         dtype = d.get("type")
         if dtype not in ("f", "fs", "s"):
             continue
@@ -969,7 +979,21 @@ def extract_page(page: "fitz.Page", drop_white_fills: bool = True,
         rgb = d.get("color") if (dtype == "s" or is_degenerate_line) else d.get("fill")
         if rgb is None:
             continue
-        if drop_white_fills and _near_white(rgb):
+        # A WHITE rule drawn on a coloured band is visible and structural.
+        # Statistical yearbooks make their alternating row stripes exactly this
+        # way -- a grey band with 0.5pt white separators over it -- so dropping
+        # white as invisible discarded every row rule on the page and the table
+        # was never detected at all (2022 Saudi yearbook p172: a 9x6 table of
+        # graduates, reported as zero rules and zero tables). White on white
+        # paper is still invisible and still dropped; what changed is that the
+        # test now asks what is BEHIND the line.
+        if (drop_white_fills and _near_white(rgb) and _dark_backdrops
+                and min(r.width, r.height) < 3 and max(r.width, r.height) > 20
+                and any(b[0] <= r.x0 + 1 and b[2] >= r.x1 - 1
+                        and b[1] <= r.y0 + 1 and b[3] >= r.y1 - 1
+                        for b in _dark_backdrops)):
+            pass
+        elif drop_white_fills and _near_white(rgb):
             # A flowchart node is routinely drawn white-filled with a dark
             # (or otherwise non-white) BORDER -- "fs" with a real, visibly
             # non-white stroke is a genuine bordered box even though its

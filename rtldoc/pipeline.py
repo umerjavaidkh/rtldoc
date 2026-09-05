@@ -468,6 +468,25 @@ def _page_level_table(page, result) -> None:
     """
     if any(b.table_grid for b in result.blocks) or not result.born_digital:
         return
+    info = _band_rows(page)
+    if info is not None:
+        band = _band_table(page, info)
+        if band is not None:
+            cells = [c for r in band for c in r]
+            filled = [c for c in cells if c and c.strip()]
+            num = (sum(1 for c in filled if _NUMERIC_CELL.match(c.strip()))
+                   / max(len(filled), 1))
+            if (len(band) >= PAGE_TABLE_MIN_ROWS
+                    and max(len(r) for r in band) >= PAGE_TABLE_MIN_COLS
+                    and num >= PAGE_TABLE_MIN_NUMERIC):
+                host = max((b for b in result.blocks if b.text and not b.table_grid),
+                           key=lambda b: len(b.text), default=None)
+                if host is not None:
+                    host.table_grid = [[arabic.normalize(c)[0] if c else c
+                                        for c in r] for r in band]
+                    host.role = "table"
+                    return
+
     _projection_grid.last_score = 0.0
     grid = _projection_grid(page, tuple(page.rect))
     if not grid:
@@ -501,6 +520,118 @@ def _page_level_table(page, result) -> None:
         return
     host.table_grid = grid
     host.role = "table"
+
+BAND_MIN_ROWS = 4          # fewer stacked bands than this is not a table
+BAND_EDGE_TOL = 1.5        # band edges this close are one boundary
+BAND_MIN_WIDTH_FRAC = 0.35 # a band spans at least this much of the page
+
+
+def _band_rows(page, drawings=None):
+    """Row boundaries of a table drawn as coloured bands, not as rules.
+
+    Whole statistical yearbooks are typeset this way: the 2022 Saudi yearbook
+    p172 carries a 9x6 table of graduates by college and draws NOT ONE stroked
+    rule -- the structure is entirely alternating background rectangles.
+    detect_tables reads is_rule fills, so it sees nothing there, and every
+    fallback below it is scoped to a region that was never created.
+
+    The bands state the rows exactly: 40 wide rectangles on that page stack at
+    y = 172.7, 233.1, 252.5, 293.5, 334.5, 375.5, 405.7, 446.7, 487.7, 517.8.
+    Read from page.get_drawings() rather than prim.fills, which keeps only 4 of
+    the 40 -- the row detail is filtered out upstream.
+
+    Returns (x0, x1, [y boundaries]) or None.
+    """
+    try:
+        drawings = drawings if drawings is not None else page.get_drawings()
+    except Exception:
+        return None
+    W = page.rect.width
+    wide = [d["rect"] for d in drawings
+            if d["rect"].width >= BAND_MIN_WIDTH_FRAC * W
+            and d["rect"].height > 2.0]
+    if len(wide) < BAND_MIN_ROWS:
+        return None
+    # Bands of one table share a left and right edge, but not exactly: the
+    # outer frame, the header band and the per-row stripes are drawn at
+    # slightly different insets. Group on the dominant extent and then keep
+    # every band that sits INSIDE it, so the row stripes are not discarded for
+    # being a few points narrower than the frame -- taking one exact x-group
+    # returned 6 edges where the page has 13.
+    groups: dict[tuple, list] = {}
+    for r in wide:
+        groups.setdefault((round(r.x0 / 8) * 8, round(r.x1 / 8) * 8), []).append(r)
+    (gx0, gx1), _m = max(groups.items(), key=lambda kv: len(kv[1]))
+    members = [r for r in wide
+               if r.x0 >= gx0 - 8 and r.x1 <= gx1 + 8
+               and (r.x1 - r.x0) >= 0.6 * (gx1 - gx0)]
+    if len(members) < BAND_MIN_ROWS:
+        return None
+    edges = []
+    for y in sorted({round(v, 1) for r in members for v in (r.y0, r.y1)}):
+        if not edges or y - edges[-1] > BAND_EDGE_TOL:
+            edges.append(y)
+    if len(edges) < BAND_MIN_ROWS + 1:
+        return None
+    return (min(r.x0 for r in members), max(r.x1 for r in members), edges)
+
+
+def _band_table(page, rows_info):
+    """Build a grid from band rows and whitespace columns.
+
+    The bands give rows; they are full width, so they say nothing about
+    columns -- those come from the same whitespace projection used elsewhere,
+    scoped to the table's own box. Assigning each WORD to the (row, column) its
+    centre falls in is what turns a 40-line page into the 9-row table it is:
+    a cell here wraps over three lines, and a reconstruction that makes one row
+    per line cannot represent that.
+    """
+    x0, x1, edges = rows_info
+    words = []
+    for wx0, wy0, wx1, wy1, txt, *_rest in page.get_text("words"):
+        cx, cy = (wx0 + wx1) / 2, (wy0 + wy1) / 2
+        if x0 - 2 <= cx <= x1 + 2 and edges[0] - 2 <= cy <= edges[-1] + 2:
+            words.append((txt, wx0, wx1, cy))
+    if len(words) < 8:
+        return None
+    # columns: x positions covered by few rows are gutters
+    n = int(x1 - x0) + 2
+    cov = [0] * n
+    for _t, a, b, _y in words:
+        for i in range(max(0, int(a - x0)), min(int(b - x0) + 1, n)):
+            cov[i] += 1
+    thr = max(1, 0.06 * len(edges))
+    runs, i = [], 0
+    while i < n:
+        if cov[i] >= thr:
+            j = i
+            while j < n and cov[j] >= thr:
+                j += 1
+            runs.append((x0 + i, x0 + j))
+            i = j
+        else:
+            i += 1
+    cols = []
+    for c in runs:
+        if cols and c[0] - cols[-1][1] < 3.0:
+            cols[-1] = (cols[-1][0], c[1])
+        else:
+            cols.append(c)
+    if len(cols) < 2:
+        return None
+    grid = [["" for _ in cols] for _ in range(len(edges) - 1)]
+    for t, a, b, y in words:
+        ri = max(0, min(len(grid) - 1,
+                        sum(1 for e in edges[1:-1] if y >= e)))
+        ci, best = 0, -1.0
+        for j, (c0, c1) in enumerate(cols):
+            o = min(b, c1) - max(a, c0)
+            if o > best:
+                ci, best = j, o
+        cell = grid[ri][ci]
+        grid[ri][ci] = f"{cell} {t}".strip() if cell else t
+    grid = [r for r in grid if any(c.strip() for c in r)]
+    return grid if len(grid) >= 2 else None
 
 def _table_grid(region: Region, owned: dict[int, list],
                 opts: arabic.NormalizeOptions, fills=None,
