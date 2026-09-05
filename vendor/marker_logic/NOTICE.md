@@ -1,64 +1,53 @@
-# Vendored from Marker (datalab-to/marker) v2.0.0
+# table_recon.py, vendored from Marker (datalab-to/marker) v2.0.0
 
-Source:  https://github.com/datalab-to/marker
+Source:  https://github.com/datalab-to/marker  (marker/processors/table_recon.py)
 Licence: Apache License 2.0 -- see LICENSE here, retained verbatim as required.
-Files under src/ are unmodified copies.
+The file is an unmodified copy.
 
-## Scope
+## Why only this file
 
-The whole package is copied EXCEPT chart/figure block definitions, which were
-excluded deliberately:
+Marker reconstructs digital tables with NO model -- its own docstring says
+"There is no dedicated table-structure model". A model is reached only as a
+fallback when the judge score falls below min_recon_score, and even then it is
+OCR of the table crop (surya RecognitionPredictor), not table structure.
 
-    schema/blocks/figure.py     schema/blocks/picture.py
-    schema/groups/figure.py     schema/groups/picture.py
+So the whole of Marker's table capability for born-digital PDFs is this one
+file, and it is stdlib-only: no marker imports, no surya, no weights. That
+makes it Apache-2.0 with no commercial restriction -- the "$5M revenue" limit
+belongs to the surya model WEIGHTS, which this file never touches.
 
-122 of Marker's 126 modules are here.
+Marker's heading and chart handling were NOT taken: detection there IS the
+layout model, so there is no logic to borrow (no Marker file ever assigns
+BlockTypes.SectionHeader itself).
 
-## Licence, precisely
+## What it does, and why it is worth merging
 
-Marker's own CODE is Apache-2.0 with no commercial restriction, including the
-modules that call surya. The "$5M revenue/funding" limit belongs to the surya
-MODEL WEIGHTS, which are not redistributed here and are not in this repository
-at all. So everything under src/ may be read, adapted and shipped commercially,
-provided the Apache-2.0 notice travels with anything adapted.
+Builds ~6 candidate grids and picks between them with a content-aware judge:
 
-Practically: modules that import surya cannot RUN without those weights, even
-though their source may be freely reused.
+    PROJ_FRACS = (0.01, 0.03, 0.10)   x   bucketings ("x0", "center")
+    _score_grid = purity + no_compound + fill + hdr + 2*one_span  / 6
 
-## What is worth reading first
+Two properties rtldoc does not have:
 
-  processors/table_recon.py   The reason this directory exists, and model-free
-        (Marker's own docstring: "There is no dedicated table-structure
-        model"). Reconstructs a table from the PDF text layer by building ~6
-        candidate grids -- whitespace-gap projection at three row-frequency
-        thresholds x two bucketings -- and choosing between them with a
-        CONTENT-aware judge: column type purity, a compound-cell penalty,
-        fill, header agreement, spans-per-cell at double weight.
+  * _grid_proj needs NO drawn rules -- a column exists where span coverage
+    exceeds a fraction of the rows. That is precisely rtldoc's blind spot:
+    the Statistical Yearbook draws zero vertical rules on pages whose tables
+    we currently reach only by other means, and where our own benchmark
+    reference finds nothing at all.
 
-        Two properties rtldoc lacks. Its projection needs no drawn rules,
-        which is exactly where rtldoc is blind: the Statistical Yearbook
-        draws zero vertical rules on pages whose tables we reach only by
-        other means. And generating hypotheses and scoring them replaces
-        hand-tuned tolerances -- rtldoc accumulated roughly fifteen this
-        week, one pair of which had to be measured at 0.175 against 0.204
-        to separate two documents. Its compound-cell penalty ("a text cell
-        that is 40% digits means columns were merged") is rtldoc's welded-
-        cell defect stated as a score instead of another special case.
+  * Candidates scored against each other replace hand-tuned tolerances.
+    rtldoc accumulated ~15 of them in one week, and one pair had to be
+    measured at 0.175 against 0.204 to tell two documents apart -- a gap no
+    threshold could have been guessed into.
 
-  processors/sectionheader.py  Heading LEVELS by KMeans over line heights.
-        Note this only levels blocks the surya layout model has ALREADY
-        classified as headers -- no vendored file ever assigns
-        BlockTypes.SectionHeader. Marker's heading DETECTION is the model,
-        so it cannot be borrowed as logic. rtldoc's weakest axis (HEADING
-        58.6%) gets no help from this directory.
-
-  builders/structure.py        Assembling blocks into document structure.
-  processors/line_merge.py     Joining lines split across a layout boundary.
-  processors/ignoretext.py     Running heads/feet by cross-page frequency.
-  providers/                   PDF text-layer extraction (pdftext).
-  renderers/                   Block tree -> HTML / markdown / JSON.
+Its compound-cell penalty ("a text cell that is 40% digits means columns were
+merged") is rtldoc's welded-cell defect -- "50%" split across a boundary --
+expressed as a score rather than as another special case.
 
 ## Status
 
-REFERENCE ONLY. Nothing in rtldoc/ imports this directory, and it is not on
-the package path. It exists to be read and selectively adapted.
+REFERENCE ONLY. Nothing in rtldoc/ imports it.
+
+Next step when merging: port _score_grid alone and run it over the 43
+hand-verified tables in eval/ragbench/gold/gold.json, to see whether
+candidate-selection beats rtldoc's current 0.625 before changing the parser.
