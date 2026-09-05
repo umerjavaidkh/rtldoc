@@ -126,6 +126,44 @@ def glyphs_from_page(page: "fitz.Page", clip: tuple | None = None,
     return out
 
 
+STACK_TOL = 0.1          # an advance below this does not move the pen
+STACK_MIN = 4            # this many glyphs on one spot is a collapsed run
+
+
+def _drop_stacked_glyphs(glyphs: list["Glyph"]) -> list["Glyph"]:
+    """Remove runs of glyphs emitted on top of each other with no advance.
+
+    Chrome's print-to-PDF, and the Wikipedia print stylesheet through it, emits
+    a hidden copy of a line's letters stacked on a single point -- every glyph
+    at the same x, none advancing. They draw nothing, but they sort into the
+    line by position and weld a run of glued letters onto the front of it:
+
+        علملوثةلعرقيحدُيطلق اسم علم الوراثة العرقي  ->  ُيطلق اسم علم الوراثة العرقي
+
+    Between 42% and 55% of lines carry one in the worst files of the Arabic
+    Wikipedia stratum (biology 170/308, iraq 172/405, agriculture 135/291).
+
+    The test is STACKING, not zero width. Testing width alone destroys real
+    text: many fonts render the lam-alef ligature as one glyph whose alef
+    component carries no advance, and dropping those turned الأول into الول
+    and, on arwiki_geography, الُجْغَرافّية into الَُْافّة. Those components sit
+    at their own x; a collapsed run puts four or more on the same point, which
+    no real typesetting does.
+    """
+    if not glyphs:
+        return glyphs
+    spots: dict[tuple, int] = {}
+    for g in glyphs:
+        if (g.x1 - g.x0) < STACK_TOL:
+            key = (round(g.y, 1), round(g.x0, 1))
+            spots[key] = spots.get(key, 0) + 1
+    if not spots:
+        return glyphs
+    out = [g for g in glyphs
+           if (g.x1 - g.x0) >= STACK_TOL
+           or spots.get((round(g.y, 1), round(g.x0, 1)), 0) < STACK_MIN]
+    return out or glyphs
+
 def _drop_shadow_glyphs(glyphs: list["Glyph"]) -> list["Glyph"]:
     """Remove a duplicated text layer drawn as a drop shadow / double strike.
 
@@ -246,7 +284,7 @@ def group_baselines(glyphs: list[Glyph], tol_frac: float = 0.45,
     """
     if not glyphs:
         return []
-    glyphs = _drop_shadow_glyphs(glyphs)
+    glyphs = _drop_stacked_glyphs(_drop_shadow_glyphs(glyphs))
 
     # Rotated (90-degree) text has to be grouped on its OWN axis. Every step
     # here reasons in page coordinates and assumes horizontal text: a line is
