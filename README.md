@@ -50,6 +50,43 @@ The checks are *property-based and label-free*, so they scale to any corpus:
 | non-deterministic pages | **0** |
 | text coverage vs the PDF's own glyph stream | **~99%** |
 
+### Gulf corpus, measured end to end
+
+18 documents / 2,283 pages of Saudi and UAE statistical yearbooks, labour
+regulations, HR policy and service manuals -- the standing regression set.
+Scored with RAGBench (`eval/ragbench/`), page level, deterministic rules, no
+LLM judge:
+
+| axis | score |
+|---|---:|
+| CITATION | 98.9% |
+| COLUMN | 97.0% |
+| PAGE | 95.9% |
+| TEXT | 83.7% |
+| HEADING | 58.7% |
+| TABLE | 29.5% |
+| **OVERALL** | **77.3%** |
+
+Defect detectors over the same corpus (`eval/scorecard.py`), against the same
+build one working session earlier:
+
+| defect | before | after |
+|---|---:|---:|
+| table_missed | 942 | **571** |
+| repeated_run | 418 | **201** |
+| table_single_column | 132 | **59** |
+| order_backjump | 111 | **79** |
+| **total findings** | **3,324** | **2,735** |
+
+Two honest notes on the TABLE figure. It rose 9.4% -> 29.5% across that
+session, and **most of that was measurement, not parsing**: records were keyed
+by a header that a continuation table does not carry, the reference kept empty
+columns the parser trims, and the parser was scored zero for *correcting* the
+reference's Arabic. Only the last step (white rules) was a parser fix. And
+29.5% still understates -- on 43 hand-verified tables the same parser scores
+**0.625**, because the reference finds only *ruled* tables and a 60-case audit
+found its own grid wrong on 28% of detections.
+
 **Table quality, scored with TEDS** (the PubTabNet/OmniDocBench standard) on a
 borderless financial statement — where the whole point is a hard table:
 
@@ -113,6 +150,13 @@ none of them is a layout problem:
   Detected by *stacking*, not by zero width — many fonts render the lam-alef
   ligature as one glyph whose alef component has no advance, and filtering on
   width alone turns `الُجْغَرافّية` into `الَُْافّة`.
+- **White rules drawn on coloured bands.** Statistical yearbooks make their
+  alternating row stripes with a grey background band and 0.5pt *white*
+  separator lines over it. Dropping white fills as invisible is right on white
+  paper and wrong here -- on a grey band a white line is exactly what the
+  reader sees as the row rule. A 300-page Saudi yearbook reported **zero rules
+  and zero tables** on pages full of them; the test now asks what is *behind*
+  the line. Table coverage on that book's data half went 46% -> 84% of pages.
 - **Symbol-font bullets arrive as Private Use codepoints.** U+F0B7 is a
   bullet in Adobe's Symbol encoding and tofu everywhere else; 134 of them in
   one UAE service manual.
