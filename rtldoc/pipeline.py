@@ -493,6 +493,7 @@ def _table_grid(region: Region, owned: dict[int, list],
 
     _welded = any(_spans_columns(bb) for bb, _t in region_lines)
 
+    _region_lines_cache: dict = {"rows": None}
     for cell in region.cells:
         # Scoped to RTL cells: this is a bidi ordering bug, and the span
         # path is correct for LTR. Applied to every cell it re-rendered
@@ -510,7 +511,21 @@ def _table_grid(region: Region, owned: dict[int, list],
         if _welded and _region_rtl and page is not None and rtl_cell:
             try:
                 from . import geobidi as _gb
-                cell_lines = _gb.page_lines(page, clip=cell.bbox)
+                # Read the REGION once and keep the lines whose centre lies in
+                # this cell. Clipping to cell.bbox instead lets MuPDF CUT every
+                # line that crosses the boundary, and the offcuts land here as
+                # debris: on the 2023 yearbook contents page an Arabic cell
+                # collected "2021G / d S / h C t b Sit / it l d R / i li t H"
+                # -- the neighbouring English title, sliced up. A line belongs
+                # to one cell; it is assigned, never divided.
+                if _region_lines_cache.get("rows") is None:
+                    _region_lines_cache["rows"] = _gb.page_lines(
+                        page, clip=region.bbox)
+                cell_lines = [
+                    (bb, t) for bb, t in _region_lines_cache["rows"]
+                    if cell.bbox[0] <= (bb[0] + bb[2]) / 2 <= cell.bbox[2]
+                    and cell.bbox[1] <= (bb[1] + bb[3]) / 2 <= cell.bbox[3]
+                ]
             except Exception:
                 cell_lines = []
         if (not cell_lines and not (cell.spans or []) and page is not None
