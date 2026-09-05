@@ -435,7 +435,13 @@ def _region_words(page, bbox) -> list:
                 out.append(w)
     return out
 
-PAGE_TABLE_MIN_SCORE = 0.80   # judge score before a rule-less page gets a table
+# Marker's own judge is NOT the gate here. Measured on the 2022 Saudi
+# yearbook: it scores prose at 0.80 and real rule-less statistical tables at
+# 0.6-0.8, so thresholding on it rejects 22 of 27 genuine table pages while
+# admitting the shattered-prose fixture. It weights spans-per-cell double,
+# which is exactly what one-word-per-column prose maximises. Kept only as a
+# floor against noise; the real gate is numeric density.
+PAGE_TABLE_MIN_SCORE = 0.45
 PAGE_TABLE_MIN_ROWS = 4
 PAGE_TABLE_MIN_COLS = 2
 PAGE_TABLE_MIN_FILL = 0.60
