@@ -273,6 +273,57 @@ def _strip_repeated_activity_number(blocks: list["Block"]) -> None:
             b.text = b.text[m.end():]
 
 
+CELL_EDGE_TOL = 2.5        # a rule this close to a boundary is that boundary
+CELL_EDGE_COVER = 0.6      # and must cover this much of the row to divide it
+
+
+def _merged_runs(cells: list, fills) -> list[list]:
+    """Group a row's cells into runs that no drawn rule actually separates.
+
+    A grid built from the union of all column rules gives every row the same
+    number of cells, but a real table merges cells constantly -- a header
+    spanning the rate columns, a note running the width of the table. The
+    file says exactly where the divisions are: a boundary between two
+    adjacent cells is real only where a vertical rule segment covers that
+    row's own y-range. Splitting on a boundary that carries no rule cuts the
+    text instead, mid-word, because the words legitimately cross it
+    (confirmed real case: the Saudi penalties table, whose merged header
+    "الجزاء (النسبة المحسومة ...)" came out as four fragments, and whose
+    "50%" lost its sign to the next cell).
+
+    Returns the row's cells grouped left to right; an unmerged row comes back
+    as one run per cell, so ordinary tables are unaffected.
+    """
+    row = sorted(cells, key=lambda c: c.bbox[0])
+    if len(row) < 2 or not fills:
+        return [[c] for c in row]
+    vrules = [f for f in fills
+              if getattr(f, "is_rule", False)
+              and (f.bbox[3] - f.bbox[1]) > (f.bbox[2] - f.bbox[0])]
+    if not vrules:
+        return [[c] for c in row]
+
+    def divided(left, right) -> bool:
+        edge = (left.bbox[2] + right.bbox[0]) / 2.0
+        y0, y1 = max(left.bbox[1], right.bbox[1]), min(left.bbox[3], right.bbox[3])
+        need = CELL_EDGE_COVER * (y1 - y0)
+        if need <= 0:
+            return True
+        for f in vrules:
+            if abs(f.bbox[0] - edge) > CELL_EDGE_TOL:
+                continue
+            if min(f.bbox[3], y1) - max(f.bbox[1], y0) >= need:
+                return True
+        return False
+
+    runs = [[row[0]]]
+    for prev, cur in zip(row, row[1:]):
+        if divided(prev, cur):
+            runs.append([cur])
+        else:
+            runs[-1].append(cur)
+    return runs
+
 def _table_grid(region: Region, owned: dict[int, list],
                 opts: arabic.NormalizeOptions, fills=None,
                 page=None) -> tuple[list[list[str]], dict]:
@@ -332,6 +383,24 @@ def _table_grid(region: Region, owned: dict[int, list],
 
     _welded = any(_spans_columns(bb) for bb, _t in region_lines)
 
+    # Cells a rule does not actually separate are ONE cell; read them from
+    # their shared rectangle so a word spanning them is not cut in half.
+    _by_row: dict[int, list] = {}
+    for c in region.cells:
+        _by_row.setdefault(c.table_row, []).append(c)
+    # Scoped to RTL regions with a page to re-read from: the union re-read
+    # below goes through geobidi, which the span path above documents as
+    # wrong for LTR (applying it to every cell re-rendered 13 of 23 golden
+    # fixtures). Without a re-read a merge could only DELETE the cells it
+    # swallowed, which is exactly how this first broke the postgres fixture.
+    _merge_of: dict[int, list] = {}
+    if _region_rtl and page is not None:
+        for _cs in _by_row.values():
+            for _run in _merged_runs(_cs, fills):
+                if len(_run) > 1:
+                    for _c in _run:
+                        _merge_of[id(_c)] = _run
+
     for cell in region.cells:
         # Scoped to RTL cells: this is a bidi ordering bug, and the span
         # path is correct for LTR. Applied to every cell it re-rendered
@@ -346,10 +415,15 @@ def _table_grid(region: Region, owned: dict[int, list],
         # Not gated on the cell being empty: a welded row leaves each cell
         # holding whatever fragment happened to fit, so "has some lines" is
         # exactly the damaged state, not evidence the cell is fine.
-        if _welded and _region_rtl and page is not None and rtl_cell:
+        _run = _merge_of.get(id(cell))
+        if _run is not None or (_welded and _region_rtl and page is not None
+                                and rtl_cell):
             try:
                 from . import geobidi as _gb
-                cell_lines = _gb.page_lines(page, clip=cell.bbox)
+                _rect = cell.bbox if _run is None else (
+                    min(c.bbox[0] for c in _run), min(c.bbox[1] for c in _run),
+                    max(c.bbox[2] for c in _run), max(c.bbox[3] for c in _run))
+                cell_lines = _gb.page_lines(page, clip=_rect)
             except Exception:
                 cell_lines = []
         if (not cell_lines and not (cell.spans or []) and page is not None
@@ -381,6 +455,12 @@ def _table_grid(region: Region, owned: dict[int, list],
                 text = f"{mark} {text}"
         diags["reversed_lines"] += d.get("reversed_lines", 0)
         diags["presentation_forms"] += d.get("presentation_forms", 0)
+        # The merged text belongs to the run once, not once per cell. Blank
+        # the rest ONLY when the union actually produced text, so a failed
+        # re-read can never erase what the cells already held.
+        if _run is not None and text.strip():
+            if cell.table_col != min(c.table_col for c in _run):
+                text = ""
         grid[cell.table_row][cell.table_col] = text.strip()
 
     # Drop wholly-empty rows and columns. Borderless-table column/row
@@ -528,6 +608,14 @@ def _announces_section(text: str) -> bool:
     return bool(_SECTION_LEXICON.match(t) or _SECTION_NUMBER.match(t))
 
 
+def _is_bare_label(text: str) -> bool:
+    """A single short line that reads as a label rather than a sentence."""
+    t = (text or "").strip()
+    if not t or "\n" in t or len(t) > 60:
+        return False
+    return not t.endswith((".", "،", "؛", ";", ":", "-"))
+
+
 def _looks_like_prose(text: str) -> bool:
     """Sentence-shaped text is not a heading, however it is styled."""
     t = (text or "").strip()
@@ -611,7 +699,15 @@ def _fallback_role(region: Region, page: PagePrimitives, text: str = "") -> str:
             and _heading_shaped(region, text, max_chars=HEADING_STYLE_MAX_CHARS,
                                 max_lines=1)
             and not _looks_like_prose(text)
-            and _announces_section(text)):
+            # Announcing a section is sufficient, not necessary. Measured on a
+            # hand-labelled set of 72 candidates from eight difficult
+            # documents, requiring it held precision at 0.926 but cost recall:
+            # 15 of 40 real headings were missed, nearly all of them
+            # unnumbered ones -- "تمهيد", "العصور الوسطى", a document title.
+            # A single short line with no terminal punctuation, set in a rare
+            # non-body style, is enough evidence on its own; the precision
+            # headroom is there to spend.
+            and (_announces_section(text) or _is_bare_label(text))):
         return "heading"
     return "paragraph"
 
@@ -710,17 +806,49 @@ def _dedupe_blocks(blocks: list["Block"], quality: dict[int, int], min_len: int 
         blocks[bi].text = "\n".join(kept).strip()
 
 
-def _nearest_caption_block(fig: "Block", blocks: list["Block"]):
+CAPTION_MIN_GAP = 12.0      # a caption sits within this of a small figure
+CAPTION_GAP_FRAC = 0.5     # or this fraction of a large one
+
+
+def _nearest_caption_block(fig: "Block", blocks: list["Block"], page_rect=None):
     """Nearest caption CANDIDATE for a figure, as (block, distance).
 
     Split out from _nearest_caption so the caller can resolve competition
     between figures for the same caption -- see parse_page, where only the
     closest figure keeps it."""
+    # A figure drawn beyond the page edge is a bleed: a header banner, a
+    # background panel, a rule that runs off the trim. Its centre is a
+    # meaningless point (one such banner on UAE manual p42 spans x -87.8 to
+    # 752.2 on a 595pt page, putting its "centre" at x=332 in the middle of
+    # the text) and it is decoration, never a figure wanting a caption.
+    if page_rect is not None:
+        px0, py0, px1, py1 = page_rect
+        if (fig.bbox[0] < px0 - 1.0 or fig.bbox[1] < py0 - 1.0
+                or fig.bbox[2] > px1 + 1.0 or fig.bbox[3] > py1 + 1.0):
+            return None, 0.0
+
     fx = (fig.bbox[0] + fig.bbox[2]) / 2
     fy = (fig.bbox[1] + fig.bbox[3]) / 2
+    fh = fig.bbox[3] - fig.bbox[1]
     best, best_d = None, None
     for b in blocks:
         if b is fig or b.role in ("figure", "table", "passage") or not b.text.strip():
+            continue
+        # A caption is never the running head or the section title -- those
+        # are structural blocks that already stand on their own, and copying
+        # one into a nearby graphic simply emits it twice. Confirmed on UAE
+        # manual p42, where a decorative strip took "42 | P a g e" and a
+        # header banner took the page's own heading.
+        if b.role in ("page_furniture", "activity_marker") or \
+                (b.role or "").startswith("heading"):
+            continue
+        # And a caption is ADJACENT: it sits directly above or below the
+        # figure, overlapping it horizontally. Nearest-centre alone will
+        # reach across a page for any text at all.
+        if min(b.bbox[2], fig.bbox[2]) - max(b.bbox[0], fig.bbox[0]) <= 0:
+            continue
+        gap = max(fig.bbox[1] - b.bbox[3], b.bbox[1] - fig.bbox[3])
+        if gap > max(CAPTION_MIN_GAP, CAPTION_GAP_FRAC * fh):
             continue
         bx, by = (b.bbox[0] + b.bbox[2]) / 2, (b.bbox[1] + b.bbox[3]) / 2
         d = ((fx - bx) ** 2 + (fy - by) ** 2) ** 0.5
@@ -1161,11 +1289,12 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     # (letter excess 0.378). Figures that lose the contest simply carry no
     # caption, which is the honest answer -- an icon inside a larger
     # diagram has no caption of its own.
+    _page_rect = tuple(page.rect) if page is not None else None
     claimed: dict[int, tuple[float, "Block"]] = {}
     for b in result.blocks:
         if b.role != "figure":
             continue
-        src, dist = _nearest_caption_block(b, result.blocks)
+        src, dist = _nearest_caption_block(b, result.blocks, _page_rect)
         b.text = ""
         if src is None:
             continue

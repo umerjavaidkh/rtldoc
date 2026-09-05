@@ -521,6 +521,58 @@ def _fix_broken_space_glyphs(page: "fitz.Page", raw: dict) -> dict:
 # and math ("compute x each time" -> "compute xI each time", "IIII" for a
 # run of emoji). Confirmed across three independent documents.
 _SYMBOL_FONTS = ("dingbat", "wingding", "webding")
+_PUA_FONTS = ("symbol", "dingbat", "wingding", "webding")
+
+# A symbol font's PUA codes are its own character codes offset by 0xF000, and
+# what they MEAN is the font's published encoding -- not the Latin letter the
+# code nominally is. Word emits its bullets as Symbol 0xB7, which arrives as
+# U+F0B7 and renders as tofu in any normal font: 134 of them in the UAE
+# service manual alone, one at the head of every list item on the page.
+#
+# This is the Adobe Symbol encoding, so it is a published standard rather than
+# a guess about one file. Greek is systematic (0x41-0x5A capitals, 0x61-0x7A
+# lowercase) and spelled out as such; the rest are the codes that actually
+# occur in running text.
+_SYMBOL_GREEK_UPPER = "ΑΒΧΔΕΦΓΗΙϑΚΛΜΝΟΠΘΡΣΤΥςΩΞΨΖ"
+_SYMBOL_GREEK_LOWER = "αβχδεφγηιϕκλμνοπθρστυϖωξψζ"
+_SYMBOL_ENCODING = {
+    0x22: "∀", 0x24: "∃", 0x2D: "−", 0x40: "≅", 0x5E: "⊥", 0x7E: "∼",
+    0xA2: "′", 0xA3: "≤", 0xA5: "∞", 0xA6: "ƒ", 0xAB: "↔", 0xAC: "←",
+    0xAD: "↑", 0xAE: "→", 0xAF: "↓", 0xB0: "°", 0xB1: "±", 0xB2: "″",
+    0xB3: "≥", 0xB4: "×", 0xB6: "∂", 0xB7: "•", 0xB8: "÷", 0xB9: "≠",
+    0xBA: "≡", 0xBB: "≈", 0xC7: "∩", 0xC8: "∪", 0xC9: "⊃", 0xCC: "⊂",
+    0xCE: "∈", 0xCF: "∅", 0xD0: "∠", 0xD6: "√", 0xD7: "⋅", 0xE5: "∑",
+    0xF2: "∫",
+}
+for _i, _ch in enumerate(_SYMBOL_GREEK_UPPER):
+    _SYMBOL_ENCODING.setdefault(0x41 + _i, _ch)
+for _i, _ch in enumerate(_SYMBOL_GREEK_LOWER):
+    _SYMBOL_ENCODING.setdefault(0x61 + _i, _ch)
+
+# ZapfDingbats list markers, which are the only dingbats that carry meaning in
+# running text; every other dingbat code is a pictograph and is dropped.
+_DINGBAT_ENCODING = {
+    0x6C: "•", 0x6E: "▪", 0x6F: "▫", 0x71: "▪", 0x73: "▪", 0x75: "◆",
+    0xA7: "▪",
+}
+
+
+def _decode_symbol_pua(ch: str, font: str) -> str:
+    """One PUA character from a symbol font, as the text it stands for.
+
+    Returns "" for a code with no textual meaning, so a pictograph is dropped
+    rather than left to render as tofu.
+    """
+    code = ord(ch) - 0xF000
+    if not 0 <= code <= 0xFF:
+        return ch
+    if "dingbat" in font:
+        return _DINGBAT_ENCODING.get(code, "")
+    if "symbol" in font:
+        return _SYMBOL_ENCODING.get(code, "")
+    return ""
+
+
 
 
 def _drop_symbol_font_letters(raw: dict) -> dict:
@@ -546,10 +598,42 @@ def _drop_symbol_font_letters(raw: dict) -> dict:
     return raw
 
 
+def _map_symbol_pua(raw: dict) -> dict:
+    """Turn a symbol font's Private Use codes into the characters they mean.
+
+    Scoped to spans whose font is a symbol font AND to the U+F000-U+F0FF
+    block, so a text font's own PUA (an icon set, a ligature in a webfont) is
+    left alone. An unmapped code resolves to "" and its character is dropped:
+    a pictograph with no textual reading is better absent than rendered as a
+    black box in the middle of a sentence.
+    """
+    for block in raw.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                font = span.get("font", "").lower()
+                if not any(sf in font for sf in _PUA_FONTS):
+                    continue
+                out = []
+                for ch in span.get("chars") or ():
+                    c = ch.get("c", "")
+                    if len(c) == 1 and 0xF000 <= ord(c) <= 0xF0FF:
+                        c = _decode_symbol_pua(c, font)
+                        if not c:
+                            continue
+                        ch = {**ch, "c": c}
+                    out.append(ch)
+                if span.get("chars") is not None:
+                    span["chars"] = out
+    return raw
+
+
 def rawdict(page: "fitz.Page", clip=None) -> dict:
     raw = page.get_text("rawdict", flags=_RAWDICT_FLAGS,
                         clip=fitz.Rect(clip) if clip is not None else None)
-    return _drop_symbol_font_letters(_fix_broken_space_glyphs(page, raw))
+    return _map_symbol_pua(
+        _drop_symbol_font_letters(_fix_broken_space_glyphs(page, raw)))
 
 
 def _block_text(block: dict) -> str:

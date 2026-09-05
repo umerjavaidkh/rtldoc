@@ -123,10 +123,17 @@ def _merge_collinear(rules: list[Fill], horizontal: bool, tol: float = 2.0) -> l
     stroked segments rather than a single continuous line -- this book's
     row separators are each split into 3-4 pieces at the same y.
     """
+    # Cluster by proximity rather than rounding to a grid: two rules 2pt apart
+    # can straddle a bin boundary and stay separate, which is how a separator
+    # drawn twice (y=344 and y=346 on UAE manual p21) survived as two row lines
+    # of different lengths and dragged the consistency vote below its bar.
+    ordered = sorted(rules, key=lambda f: f.bbox[1] if horizontal else f.bbox[0])
     groups: dict[float, list[Fill]] = {}
-    for f in rules:
+    key = None
+    for f in ordered:
         pos = f.bbox[1] if horizontal else f.bbox[0]
-        key = round(pos / tol) * tol
+        if key is None or pos - key > tol:
+            key = pos
         groups.setdefault(key, []).append(f)
     out = []
     for key, members in groups.items():
@@ -215,9 +222,38 @@ def detect_tables(prim: PagePrimitives, min_rows: int = 2, min_cols: int = 2,
         return []
     all_rules = all_rules + _synth_row_rules(prim, all_rules)
 
-    tables: list[Region] = []
-    for cluster in _cluster_rules(all_rules):
-        tables.extend(_detect_table_in_cluster(cluster, min_rows, min_cols, coverage))
+    def _detect(rules: list["Fill"]) -> list[Region]:
+        found: list[Region] = []
+        for cluster in _cluster_rules(rules):
+            for band in _split_by_column_profile(cluster):
+                found.extend(_detect_table_in_cluster(band, min_rows, min_cols,
+                                                      coverage))
+        return found
+
+    tables = _detect(all_rules)
+
+    # Last resort only. Inferring columns from where row rules break is right
+    # for a cell-ruled table (see _synth_col_rules) but wrong wherever real
+    # rules already describe a grid: a 10-K underlines its numeric cells, and
+    # those underline endpoints recur row to row convincingly enough to pass
+    # every test the synthesis can apply, yet they are not the column edges --
+    # letting them run there turned a correct 18x7 into a welded 9x3. Running
+    # it only when the rules yielded nothing at all keeps it from ever
+    # overriding a detection that already works.
+    # What the rules have already explained: a detected table, and any y a
+    # vertical divider covers. Whatever horizontal rules are left over may
+    # still be a cell-ruled table that draws no verticals at all -- p19 of the
+    # UAE manual is exactly this, a synthesised-column table stacked above a
+    # normally ruled one, so the test has to be per REGION and not per page.
+    covered = [(t.bbox[1], t.bbox[3]) for t in tables]
+    covered += [(f.bbox[1], f.bbox[3]) for f in all_rules
+                if (f.bbox[3] - f.bbox[1]) > (f.bbox[2] - f.bbox[0])]
+    free = [f for f in all_rules
+            if (f.bbox[2] - f.bbox[0]) > (f.bbox[3] - f.bbox[1])
+            and not any(lo - 1.0 <= f.bbox[1] <= hi + 1.0 for lo, hi in covered)]
+    synth = _synth_col_rules(prim, free)
+    if synth:
+        tables.extend(_detect(free + synth))
     return tables
 
 
@@ -275,6 +311,288 @@ def _synth_row_rules(prim: PagePrimitives, all_rules: list["Fill"]) -> list["Fil
                  is_rule=True, is_stroke=True) for y in ys]
 
 
+# Two rules this close in x are one divider drawn twice (a stroked line and
+# its fill edge, or a 0.2pt rendering artefact), not two columns.
+COL_RULE_TOL = 1.5
+# A band must be at least this tall, and carry this many row rules, to be a
+# table in its own right; anything smaller is a sliver and folds into its
+# neighbour rather than becoming a one-row fragment.
+BAND_MIN_HEIGHT = 12.0
+BAND_MIN_ROWS = 2
+# Abutting per-cell divider segments join across a gap this small; a
+# divider genuinely missing for a section leaves a wider hole than this.
+DIVIDER_JOIN = 3.0
+# Interior dividers must be present over this much of the cluster height
+# before a change between them is read as a change of table.
+PROFILE_INTERIOR_COVER = 0.5
+# A divider running this much of the height is part of the frame, not interior.
+PROFILE_FULL_RUN = 0.9
+
+
+def _divider_runs(verts: list[Fill]) -> dict:
+    """Where each column divider actually runs, x -> [(y0, y1), ...].
+
+    Grouped by x (to COL_RULE_TOL, so a line drawn twice counts once) and
+    joined along y across DIVIDER_JOIN, because these files draw a divider as
+    one short segment per cell rather than one long line. Joining abutting
+    segments is what keeps a per-cell-drawn divider from reading as a change
+    of layout at every single row; a real gap -- the divider genuinely not
+    being there for a section -- is wider than a rule is thick and survives.
+    """
+    groups: dict[float, list[tuple[float, float]]] = {}
+    for f in verts:
+        key = round(f.bbox[0] / COL_RULE_TOL) * COL_RULE_TOL
+        groups.setdefault(key, []).append((f.bbox[1], f.bbox[3]))
+    out: dict[float, list[list[float]]] = {}
+    for key, ivs in groups.items():
+        runs: list[list[float]] = []
+        for y0, y1 in sorted(ivs):
+            if runs and y0 - runs[-1][1] <= DIVIDER_JOIN:
+                runs[-1][1] = max(runs[-1][1], y1)
+            else:
+                runs.append([y0, y1])
+        out[key] = runs
+    return out
+
+
+def _split_by_column_profile(cluster: list[Fill]) -> list[list[Fill]]:
+    """Cut one rule cluster into bands that each have a single column layout.
+
+    Why this exists
+    ---------------
+    _detect_table_in_cluster keeps a vertical rule as a column only if it
+    spans `coverage` (0.5) of the CLUSTER's full height. That is right for
+    one table and wrong for several stacked in one frame, which is a very
+    common shape: a spec sheet or a bilingual contract draws an outer box and
+    changes its internal column count section by section. Every divider that
+    serves only one section then measures short against the whole stack and
+    is dropped, so that section loses its columns and its text falls out of
+    the grid as loose prose.
+
+    Two confirmed cases, previously believed unrelated: the UAE service
+    manual (600bb49d p19-23), where one lattice y149-489 carries 2-, 3- and
+    4-column sections; and the Saudi labour contract (f9b88f18 p81), three
+    stacked tables at x-edges [71,262,525], [71,252,525] then
+    [71,216,305,525], which collapsed to a single 8x1 column of mush. Page 80
+    of that same file has ONE profile throughout and parsed correctly --
+    which is why fixing 80 never fixed 81.
+
+    Splitting on the profile makes each band internally consistent, so every
+    divider spans its own band fully and the coverage test passes on its own
+    terms. A cluster with one profile comes back unchanged, so ordinary
+    single-layout tables take exactly the path they did before.
+    """
+    verts = [f for f in cluster if (f.bbox[3] - f.bbox[1]) > (f.bbox[2] - f.bbox[0])]
+    horiz = [f for f in cluster if (f.bbox[2] - f.bbox[0]) > (f.bbox[3] - f.bbox[1])]
+    if len(verts) < 2 or not horiz:
+        return [cluster]
+
+    runs = _divider_runs(verts)
+    # Stacked tables versus a table with subdivided rows. Both show interior
+    # dividers at differing x down the page, and no threshold on an individual
+    # divider's length can tell them apart -- measured, the labour contract p81
+    # NEEDS a divider running 0.175 of the height while the UAE manual p25 must
+    # IGNORE one running 0.204. What separates them is whether the interior
+    # dividers TILE: stacked tables each supply their own, so some interior
+    # divider is present at nearly every y, whereas a row split leaves most of
+    # the height with no interior divider at all (p81 covers ~1.0, p25 ~0.3).
+    top = min(f.bbox[1] for f in verts)
+    height = max(f.bbox[3] for f in verts) - top
+    if height <= 0:
+        return [cluster]
+    # "Interior" means not full-height, NOT merely not-outermost: p25 is a
+    # two-column table whose real divider at x=472.5 runs the whole way, and
+    # counting that as interior made its sparse row splits look like tiling.
+    inner = [iv for x, rs in runs.items()
+             if sum(b - a for a, b in rs) < PROFILE_FULL_RUN * height
+             for iv in rs]
+    covered, merged = 0.0, []
+    for a, b in sorted(inner):
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    covered = sum(b - a for a, b in merged)
+    if covered / height < PROFILE_INTERIOR_COVER:
+        return [cluster]
+    edges = sorted({round(v, 1) for rs in runs.values() for r in rs for v in r})
+    if len(edges) < 3:
+        return [cluster]
+
+    def profile(lo: float, hi: float) -> tuple:
+        mid = (lo + hi) / 2.0
+        return tuple(sorted(x for x, rs in runs.items()
+                            if any(a <= mid <= b for a, b in rs)))
+
+    # A divider that DISAPPEARS for a stretch is a merged cell -- the single
+    # commonest thing in a real table -- so a profile that is a subset of its
+    # neighbour continues the same table. A divider that MOVES (an x present
+    # in neither direction's set) is a different table underneath, and only
+    # that splits. Without this distinction every merged cell starts a new
+    # one-row "table": confirmed on the labour contract p80, whose header row
+    # drops the middle divider and was being cut off as its own 1x2 band.
+    bands: list[list] = []
+    for lo, hi in zip(edges, edges[1:]):
+        if hi - lo <= 0.5:
+            continue
+        prof = profile(lo, hi)
+        if bands:
+            prev = bands[-1][2]
+            a, b = set(prev), set(prof)
+            if a <= b or b <= a:
+                bands[-1][1] = hi
+                bands[-1][2] = tuple(sorted(a | b))
+                continue
+        bands.append([lo, hi, prof])
+
+    # A band with fewer than two dividers is not a grid of its own; fold it
+    # into whichever neighbour it touches so its rules are not simply lost.
+    merged: list[list] = []
+    for b in bands:
+        thin = len(b[2]) < 2 or (b[1] - b[0]) < BAND_MIN_HEIGHT
+        if thin and merged:
+            merged[-1][1] = b[1]
+        elif not thin:
+            merged.append(b)
+    if len(merged) <= 1:
+        return [cluster]
+
+    out: list[list[Fill]] = []
+    for lo, hi, _prof in merged:
+        rows = [f for f in horiz if lo - 1.0 <= f.bbox[1] <= hi + 1.0]
+        if len(rows) < BAND_MIN_ROWS:
+            continue
+        cols = []
+        for f in verts:
+            y0, y1 = max(f.bbox[1], lo), min(f.bbox[3], hi)
+            if y1 - y0 > 1.0:
+                cols.append(Fill(bbox=(f.bbox[0], y0, f.bbox[2], y1),
+                                 color=f.color, is_rule=True,
+                                 is_stroke=f.is_stroke))
+        if len(cols) >= 2:
+            out.append(rows + cols)
+    return out or [cluster]
+
+
+# A row-ruled table needs at least this many separators before its columns are
+# worth inferring; two lines are an underline and a rule, not a grid.
+SYNTH_COL_MIN_ROWS = 3
+SYNTH_COL_EXTENT_TOL = 6.0
+# Fraction of rows that must break at an x before it counts as a column edge.
+SYNTH_COL_EDGE_AGREE = 0.6
+# How much of the row width the rules must actually cover to be a cell grid.
+SYNTH_COL_MIN_COVERAGE = 0.6
+# Two row rules closer than this are one separator drawn twice.
+SYNTH_COL_ROW_TOL = 3.0
+
+
+def _synth_col_rules(prim: PagePrimitives, horiz: list["Fill"]) -> list["Fill"]:
+    """Column dividers a table states only by where its row rules stop.
+
+    The mirror image of _synth_row_rules. That one covers a table that draws
+    only its column dividers and breaks them at the rows; this covers the
+    opposite, a table that draws only its row rules and breaks THEM at the
+    columns. _detect_table_in_cluster requires both directions and returns
+    nothing for these, so the table falls through to prose; worse,
+    _cluster_rules has no vertical to bridge the rows with and shatters one
+    table into a cluster per row.
+
+    Confirmed real cases, both in the UAE service manual (600bb49d): p16, a
+    seven-row service list with 35 horizontal rules, ZERO vertical rules, and
+    every row drawn as five segments at x 68-172, 172-228, 232-292, 292-428
+    and 444-524 -- precisely its five columns; and p19, where a table of this
+    kind sits directly ABOVE a conventionally ruled one, which is why the
+    caller passes only the rules nothing else has explained rather than
+    testing the page as a whole.
+
+    Columns are read from the rule geometry itself, never inferred from text:
+    each segment endpoint is a column edge. Rules are grouped into tables by
+    vertical proximity first, because two stacked tables of this kind have
+    different columns and pooling their endpoints yields edges belonging to
+    neither.
+    """
+    if len(horiz) < SYNTH_COL_MIN_ROWS:
+        return []
+
+    # distinct rows, merging the near-duplicates left by a rule drawn twice
+    ys: list[float] = []
+    for y in sorted(round(f.bbox[1], 1) for f in horiz):
+        if not ys or y - ys[-1] > SYNTH_COL_ROW_TOL:
+            ys.append(y)
+    if len(ys) < SYNTH_COL_MIN_ROWS:
+        return []
+
+    # split into tables where the row pitch jumps: a gap several times the
+    # usual one is the space between two tables, not a tall row
+    gaps = [b_ - a_ for a_, b_ in zip(ys, ys[1:])]
+    limit = max(3.0 * statistics.median(gaps), 30.0) if gaps else 30.0
+    groups: list[list[float]] = [[ys[0]]]
+    for prev, y in zip(ys, ys[1:]):
+        (groups[-1] if y - prev <= limit else groups.append([]) or groups[-1]).append(y)
+
+    out: list[Fill] = []
+    for grp in groups:
+        if len(grp) < SYNTH_COL_MIN_ROWS:
+            continue
+        y0, y1 = grp[0], grp[-1]
+        rows: dict[float, list[Fill]] = {}
+        for f in horiz:
+            for y in grp:
+                if abs(f.bbox[1] - y) <= SYNTH_COL_ROW_TOL:
+                    rows.setdefault(y, []).append(f)
+                    break
+        if len(rows) < SYNTH_COL_MIN_ROWS:
+            continue
+        # A cell-ruled table rules EVERY cell, so its segments tile the row
+        # almost end to end. A financial statement underlines only its numeric
+        # cells and leaves the label column bare -- the same segment count over
+        # a fraction of the width, and those endpoints are NOT column edges.
+        # Measured: the UAE service list tiles 0.79 of its width, a GOOGL 10-K
+        # page 0.27, and letting the latter run welded a correct 18x7 to 9x3.
+        if statistics.median(len(v) for v in rows.values()) < 2:
+            continue
+        lo_x = min(f.bbox[0] for v in rows.values() for f in v)
+        hi_x = max(f.bbox[2] for v in rows.values() for f in v)
+        if hi_x - lo_x <= 0:
+            continue
+        covs = []
+        for segs in rows.values():
+            merged: list[list[float]] = []
+            for a_, b_ in sorted((f.bbox[0], f.bbox[2]) for f in segs):
+                if merged and a_ <= merged[-1][1] + 2.0:
+                    merged[-1][1] = max(merged[-1][1], b_)
+                else:
+                    merged.append([a_, b_])
+            covs.append(sum(b_ - a_ for a_, b_ in merged) / (hi_x - lo_x))
+        if statistics.median(covs) < SYNTH_COL_MIN_COVERAGE:
+            continue
+
+        edges: list[float] = []
+        for x in sorted(v for segs in rows.values() for f in segs
+                        for v in (f.bbox[0], f.bbox[2])):
+            if not edges or x - edges[-1] > SYNTH_COL_EXTENT_TOL:
+                edges.append(x)
+            else:
+                edges[-1] = (edges[-1] + x) / 2.0
+        if len(edges) < 3:
+            continue
+        # A real column edge recurs: the rows break at the SAME x. An edge seen
+        # in one row alone is that row's own quirk and would slice the others.
+        keep = [edges[0]]
+        for x in edges[1:-1]:
+            seen = sum(1 for segs in rows.values()
+                       if any(abs(v - x) <= SYNTH_COL_EXTENT_TOL
+                              for f in segs for v in (f.bbox[0], f.bbox[2])))
+            if seen >= max(2, len(rows) * SYNTH_COL_EDGE_AGREE):
+                keep.append(x)
+        if len(keep) < 2:
+            continue
+        keep.append(edges[-1])
+        out.extend(Fill(bbox=(x, y0, x, y1), color=(0.0, 0.0, 0.0),
+                        is_rule=True, is_stroke=True) for x in keep)
+    return out
+
+
 def _detect_table_in_cluster(cluster: list[Fill], min_rows: int, min_cols: int,
                              coverage: float) -> list[Region]:
     horiz_rules = [f for f in cluster if (f.bbox[2] - f.bbox[0]) > (f.bbox[3] - f.bbox[1])]
@@ -321,8 +639,25 @@ def _detect_table_in_cluster(cluster: list[Fill], min_rows: int, min_cols: int,
         tol = tol_frac * span
         mid_lo = statistics.median(los)
         mid_hi = statistics.median(his)
-        ok = sum(1 for a, b in zip(los, his)
-                 if abs(a - mid_lo) <= tol and abs(b - mid_hi) <= tol)
+        # A rule that stops short at ONE end, consistently, is a merged cell
+        # above or below it -- not a stray mark. The commonest shape in these
+        # documents is a merged header cell spanning the rate columns, under
+        # which those columns' dividers legitimately begin one row lower.
+        # Requiring both endpoints to match scored the Saudi penalties table
+        # (7 column rules, 3 starting 35pt lower) at 0.571 against a 0.7 bar
+        # and discarded a fully-ruled 6-column grid, which then fell to the
+        # geometric path and came out as 2 columns of interleaved text.
+        # Containment within the majority extent, covering most of it, keeps
+        # that table while still rejecting two unrelated decorative rules --
+        # they share no extent to be contained in.
+        span_lo, span_hi = mid_lo - tol, mid_hi + tol
+        need = CONSISTENT_CONTAIN_FRAC * (mid_hi - mid_lo)
+        ok = 0
+        for a, b in zip(los, his):
+            if abs(a - mid_lo) <= tol and abs(b - mid_hi) <= tol:
+                ok += 1
+            elif span_lo <= a and b <= span_hi and (b - a) >= need:
+                ok += 1
         return ok >= max(2, len(lines) * agree)
 
     if not _consistent(row_lines, span_x) or not _consistent(col_lines, span_y):
@@ -2731,6 +3066,9 @@ def _cluster_flow(spans: list[Span], gap_mult: float = 1.6, size_ratio: float = 
 # Against the page's own line height the gutter is stable -- median 1.6x --
 # which is why the floor below is a fraction of it. The absolute floor only
 # guards degenerate input.
+# A rule stopping short at one end still counts as part of the grid if it
+# is contained in the majority extent and covers this much of it.
+CONSISTENT_CONTAIN_FRAC = 0.6
 GUTTER_MIN_FRAC = 0.55      # of the page's median line height
 GUTTER_MIN_ABS = 3.0        # points, when no usable line metric exists
 
