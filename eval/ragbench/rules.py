@@ -66,6 +66,11 @@ def normalize(text: str) -> str:
     # and rtldoc correctly removes it. Comparing without stripping it scored a
     # page at 3% recall when every word was in fact present and correct.
     text = text.replace("\u0640", "")
+    # Symbol-font Private Use codepoints. The reference reads the raw stream,
+    # where a Word bullet is still U+F0B7; rtldoc decodes it to "\u2022" via the
+    # Adobe Symbol encoding. Comparing those scores the parser 0 for being
+    # right, so both sides drop the block here.
+    text = "".join(" " if 0xF000 <= ord(c) <= 0xF0FF else c for c in text)
     text = "".join(_AR_DIGITS.get(c, c) for c in text)
     # HTML tags must go BEFORE the markdown character strip -- stripping ">"
     # first leaves "<br" behind, which then survives into every cell value and

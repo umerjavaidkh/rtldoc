@@ -219,7 +219,28 @@ def _cell_equal(a: str, b: str) -> bool:
         from rapidfuzz import fuzz
     except ImportError:
         return False
-    return fuzz.token_set_ratio(x, y) >= _CELL_MATCH
+    if fuzz.token_set_ratio(x, y) >= _CELL_MATCH:
+        return True
+    # Arabic tokens whose LETTERS match but whose order does not. The raw text
+    # layer returns a lam-alef ligature decomposed in visual order, so the
+    # reference holds "المايل" where the word is "المالي" -- the same
+    # characters, two of them transposed. rtldoc repairs that; comparing on
+    # order alone therefore scores the parser 0 for being more correct, which
+    # is what this whole function exists to prevent.
+    #
+    # Scoped to cells that are mostly Arabic and to a multiset over the WHOLE
+    # cell, so it stays a statement about orthography and not a licence to
+    # match any anagram: a cell with different content has different letters.
+    ar = sum(1 for c in x if "\u0600" <= c <= "\u06ff")
+    if ar >= 0.5 * max(len(x.replace(" ", "")), 1):
+        from collections import Counter
+        cx = Counter(c for c in x if not c.isspace())
+        cy = Counter(c for c in y if not c.isspace())
+        if cx and cy:
+            common = sum((cx & cy).values())
+            if common / max(sum(cx.values()), sum(cy.values())) >= 0.92:
+                return True
+    return False
 
 
 def table_record_fidelity(truth_records: list, pred_records: list) -> Score:
