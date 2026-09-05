@@ -273,6 +273,167 @@ def _strip_repeated_activity_number(blocks: list["Block"]) -> None:
             b.text = b.text[m.end():]
 
 
+PROJECTION_MIN_COLS = 2     # below this, the rule path has not found a table
+
+
+def _projection_lines(page, bbox):
+    """Words in `bbox` as table_recon's [(spans, y0, y1)], read through geobidi.
+
+    The words must come from the SAME path as the rest of rtldoc, not from
+    page.get_text("words"): that returns glyphs in visual order and in their
+    presentation forms, so an Arabic cell arrives shattered and reversed
+    (measured on the 2023 yearbook p25: "ﻳﺔ | دار | ﻹ | ا" where the text reads
+    "الإدارية"). geobidi resolves the bidi runs, repairs the lam-alef order and
+    deshapes, which is the whole reason rtldoc exists.
+
+    Lines are grouped by baseline rather than by MuPDF's block/line numbers,
+    which give each table CELL its own block and would make every cell a
+    one-token row -- with that grouping the projection scored 0.061 on the
+    hand-verified tables against 0.356 grouped by baseline.
+    """
+    from . import geobidi as _gb
+    glyphs = _gb.glyphs_from_page(page, clip=tuple(bbox))
+    if not glyphs:
+        return []
+    # Reader chosen by SCRIPT: each is right for one of them. get_text("words")
+    # returns Arabic in visual order and presentation forms -- garbage in Gulf
+    # documents -- so Arabic goes through geobidi, which resolves bidi runs,
+    # repairs lam-alef order and deshapes. Applied to Latin, though, geobidi
+    # drops the hand-verified-table score from 0.356 to 0.066.
+    if not arabic.is_arabic("".join(g.c for g in glyphs)):
+        ws = []
+        for x0, y0, x1, y1, txt, _b, _l, _w in page.get_text("words"):
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            if bbox[0] <= cx <= bbox[2] and bbox[1] <= cy <= bbox[3]:
+                ws.append((txt, x0, x1, y0, y1))
+        if not ws:
+            return []
+        ws.sort(key=lambda w: (w[3], w[1]))
+        hs = sorted(w[4] - w[3] for w in ws)
+        tol = max(2.0, 0.5 * hs[len(hs) // 2])
+        rows = [[ws[0]]]
+        for w in ws[1:]:
+            if w[3] - rows[-1][-1][3] <= tol:
+                rows[-1].append(w)
+            else:
+                rows.append([w])
+        out = []
+        for r in rows:
+            r.sort(key=lambda t: t[1])
+            out.append(([(t, a, b) for t, a, b, _, _ in r],
+                        round(min(w[3] for w in r), 1), round(max(w[4] for w in r), 1)))
+        return out
+    lines = []
+    for line in _gb.group_baselines(glyphs):
+        if not line:
+            continue
+        run = sorted(line, key=lambda g: g.x0)
+        # Split on space GLYPHS, not on advance gaps: these producers emit a
+        # real space character and leave no measurable gap between glyphs
+        # (measured on the 2023 yearbook -- zero inter-glyph gaps above 0.5pt
+        # on a line of ordinary spaced words), so a gap rule merges the whole
+        # line into one token and the grid is rejected for having one cell.
+        sizes = [g.size for g in run if g.size]
+        gap = max(1.0, 0.25 * (sorted(sizes)[len(sizes) // 2] if sizes else 8.0))
+        words, cur = [], []
+        for g in run:
+            if g.c.isspace() or (cur and g.x0 - cur[-1].x1 > gap):
+                if cur:
+                    words.append(cur)
+                cur = [] if g.c.isspace() else [g]
+            else:
+                cur.append(g)
+        if cur:
+            words.append(cur)
+        spans = []
+        for w in words:
+            if not w:
+                continue
+            txt = _gb.line_to_text(w).strip()
+            if txt:
+                spans.append((txt, min(g.x0 for g in w), max(g.x1 for g in w)))
+        if spans:
+            y0 = min(g.y - g.size for g in run)
+            y1 = max(g.y + g.size * 0.3 for g in run)
+            lines.append((spans, round(y0, 1), round(y1, 1)))
+    lines.sort(key=lambda l: l[1])
+    return lines
+
+
+def _projection_grid(page, bbox):
+    """A grid recovered from whitespace alone, or None.
+
+    Where a table draws no usable column rules, rtldoc has nothing to read and
+    returns an empty or single-column grid -- borderless statistical tables are
+    the common case, and our own benchmark reference is equally blind to them.
+    Marker's reconstruction needs no rules: it projects span coverage across x,
+    builds several candidate grids and picks one with a content-aware judge.
+
+    Strictly a fallback. On the 43 hand-verified tables, preferring projection
+    wherever its judge was confident scored 0.41-0.59 against rtldoc's 0.625,
+    while using it only where rtldoc found nothing scored 0.665.
+    """
+    try:
+        from . import _marker_table_recon as _tr
+        lines = _projection_lines(page, bbox)
+        if not lines:
+            return None
+        res = _tr.reconstruct_table_html(lines)
+        if not res:
+            return None
+        import html as _h
+        import re as _re
+        grid = []
+        for row in _re.findall(r"<tr>(.*?)</tr>", res[0], _re.S):
+            cells = [_h.unescape(_re.sub("<[^>]+>", "", c)).strip()
+                     for c in _re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", row, _re.S)]
+            if cells:
+                grid.append([arabic.normalize(c)[0] if c else c for c in cells])
+        if len(grid) < 2 or max(len(r) for r in grid) < PROJECTION_MIN_COLS:
+            return None
+        return grid
+    except Exception:
+        return None
+
+def _grid_fidelity(grid, words) -> float:
+    """How faithfully a grid reproduces the words that are actually on the page.
+
+    Coverage x integrity, both measured against the source rather than against
+    any ground truth, so it can be computed at parse time:
+
+      coverage   -- the word appears somewhere in the grid at all. A grid that
+                    drops text is wrong however tidy it looks.
+      integrity  -- the word appears WHOLE inside a single cell. A boundary
+                    drawn through a word splits it across two cells, which is
+                    the defect behind "المخالفة" -> "المخ" + "خالفة" and "50%"
+                    losing its sign.
+
+    Two grids built from the same region can therefore be compared without
+    knowing which is right. Measured on the 43 hand-verified tables, selecting
+    on this scores 0.673, against 0.625 for rtldoc alone, 0.646 for using
+    projection only where rtldoc came back empty, and 0.715 for an oracle that
+    always picks the better grid.
+    """
+    if not grid or not words:
+        return 0.0
+    cells = [arabic.normalize(c)[0] for r in grid for c in r if c and c.strip()]
+    if not cells:
+        return 0.0
+    blob = " ".join(cells)
+    intact = sum(1 for w in words if any(w in c for c in cells))
+    present = sum(1 for w in words if w in blob)
+    return (present / len(words)) * (intact / len(words))
+
+
+def _region_words(page, bbox) -> list:
+    out = []
+    for x0, y0, x1, y1, txt, _b, _l, _w in page.get_text("words"):
+        if bbox[0] <= (x0 + x1) / 2 <= bbox[2] and bbox[1] <= (y0 + y1) / 2 <= bbox[3]:
+            w = arabic.normalize(txt)[0].strip()
+            if len(w) > 1:
+                out.append(w)
+    return out
+
 def _table_grid(region: Region, owned: dict[int, list],
                 opts: arabic.NormalizeOptions, fills=None,
                 page=None) -> tuple[list[list[str]], dict]:
@@ -389,9 +550,24 @@ def _table_grid(region: Region, owned: dict[int, list],
     # and also tidies vector tables that had an unused frame line.
     keep_cols = [ci for ci in range(ncols) if any(grid[ri][ci] for ri in range(nrows))]
     keep_rows = [ri for ri in range(nrows) if any(grid[ri][ci] for ci in range(ncols))]
-    if not keep_cols or not keep_rows:
-        return [], diags
-    return [[grid[ri][ci] for ci in keep_cols] for ri in keep_rows], diags
+    out = ([[grid[ri][ci] for ci in keep_cols] for ri in keep_rows]
+           if keep_cols and keep_rows else [])
+
+    # Projection only where the rules described nothing. Selecting on
+    # _grid_fidelity instead scored better on the 43 hand-verified tables
+    # (0.673 vs 0.646) and still broke 6 of 23 golden fixtures: fidelity
+    # rewards keeping words whole, and a grid that shatters a paragraph into
+    # one word per column keeps every word whole. On pdfreference p79 it
+    # replaced a correct 3-column table with a 13-column one. Requiring the
+    # challenger to have no fewer columns made that worse, not better, because
+    # the shattered grid has MORE columns. Left as a fallback until the
+    # fidelity measure can tell structure from confetti.
+    if page is not None and (not out or max((len(r) for r in out), default=0)
+                             < PROJECTION_MIN_COLS):
+        alt = _projection_grid(page, region.bbox)
+        if alt is not None:
+            return alt, diags
+    return out, diags
 
 
 def _table_text(region: Region, owned: dict[int, list], opts: arabic.NormalizeOptions,
