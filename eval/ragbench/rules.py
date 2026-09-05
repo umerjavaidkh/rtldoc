@@ -343,6 +343,16 @@ def grid_to_records(grid: list[list[str]], page: int) -> list[TableRecord]:
     grid = _merge_wrapped_rows(grid)
     if len(grid) < 2:
         return []
+    # Drop wholly-empty columns, exactly as pipeline._table_grid does for the
+    # prediction. Keeping them here gave the two sides different column counts
+    # on 11% of tables -- a phantom column shifts every header, the key sets
+    # stop overlapping and the whole table scores zero however well it was
+    # read.
+    ncols = max(len(r) for r in grid)
+    keep = [c for c in range(ncols)
+            if any((r[c] if c < len(r) else "").strip() for r in grid)]
+    if keep and len(keep) < ncols:
+        grid = [[(r[c] if c < len(r) else "") for c in keep] for r in grid]
     header = [h or f"col{i}" for i, h in enumerate(grid[0])]
     out = []
     for row in grid[1:]:

@@ -151,6 +151,22 @@ def _record_sim(g: dict, p: dict) -> float:
     the point: for RAG the header IS the meaning."""
     if not g and not p:
         return 1.0
+    # Positional fallback. Keying on the header is right when both sides HAVE
+    # the same header, and catastrophic when they do not: a table continued
+    # across a page break has its header on the previous page, so both sides
+    # key off whatever data row came first and no key pairs. Measured on the
+    # Gulf corpus, 38% of scored tables scored exactly zero for this reason
+    # alone, and matching the same tables by cell position instead lifted the
+    # mean from 0.155 to 0.220. When no header pairs, compare cell by cell in
+    # order -- the columns are still in the same sequence.
+    if g and p and not (set(g) & set(p)):
+        gv, pv = list(g.values()), list(p.values())
+        n = max(len(gv), len(pv))
+        if n:
+            same = sum(1 for i in range(n)
+                       if _cell_equal(gv[i] if i < len(gv) else "",
+                                      pv[i] if i < len(pv) else ""))
+            return same / n
     # Headers are paired by near-equality too, for the same reason the values
     # are: a reference header read out of the raw word stream comes back with
     # its words in visual order ("التعلّم مؤشر" for "مؤشر التعلّم"), and an
