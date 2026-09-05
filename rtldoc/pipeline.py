@@ -273,57 +273,6 @@ def _strip_repeated_activity_number(blocks: list["Block"]) -> None:
             b.text = b.text[m.end():]
 
 
-CELL_EDGE_TOL = 2.5        # a rule this close to a boundary is that boundary
-CELL_EDGE_COVER = 0.6      # and must cover this much of the row to divide it
-
-
-def _merged_runs(cells: list, fills) -> list[list]:
-    """Group a row's cells into runs that no drawn rule actually separates.
-
-    A grid built from the union of all column rules gives every row the same
-    number of cells, but a real table merges cells constantly -- a header
-    spanning the rate columns, a note running the width of the table. The
-    file says exactly where the divisions are: a boundary between two
-    adjacent cells is real only where a vertical rule segment covers that
-    row's own y-range. Splitting on a boundary that carries no rule cuts the
-    text instead, mid-word, because the words legitimately cross it
-    (confirmed real case: the Saudi penalties table, whose merged header
-    "الجزاء (النسبة المحسومة ...)" came out as four fragments, and whose
-    "50%" lost its sign to the next cell).
-
-    Returns the row's cells grouped left to right; an unmerged row comes back
-    as one run per cell, so ordinary tables are unaffected.
-    """
-    row = sorted(cells, key=lambda c: c.bbox[0])
-    if len(row) < 2 or not fills:
-        return [[c] for c in row]
-    vrules = [f for f in fills
-              if getattr(f, "is_rule", False)
-              and (f.bbox[3] - f.bbox[1]) > (f.bbox[2] - f.bbox[0])]
-    if not vrules:
-        return [[c] for c in row]
-
-    def divided(left, right) -> bool:
-        edge = (left.bbox[2] + right.bbox[0]) / 2.0
-        y0, y1 = max(left.bbox[1], right.bbox[1]), min(left.bbox[3], right.bbox[3])
-        need = CELL_EDGE_COVER * (y1 - y0)
-        if need <= 0:
-            return True
-        for f in vrules:
-            if abs(f.bbox[0] - edge) > CELL_EDGE_TOL:
-                continue
-            if min(f.bbox[3], y1) - max(f.bbox[1], y0) >= need:
-                return True
-        return False
-
-    runs = [[row[0]]]
-    for prev, cur in zip(row, row[1:]):
-        if divided(prev, cur):
-            runs.append([cur])
-        else:
-            runs[-1].append(cur)
-    return runs
-
 def _table_grid(region: Region, owned: dict[int, list],
                 opts: arabic.NormalizeOptions, fills=None,
                 page=None) -> tuple[list[list[str]], dict]:
@@ -383,24 +332,6 @@ def _table_grid(region: Region, owned: dict[int, list],
 
     _welded = any(_spans_columns(bb) for bb, _t in region_lines)
 
-    # Cells a rule does not actually separate are ONE cell; read them from
-    # their shared rectangle so a word spanning them is not cut in half.
-    _by_row: dict[int, list] = {}
-    for c in region.cells:
-        _by_row.setdefault(c.table_row, []).append(c)
-    # Scoped to RTL regions with a page to re-read from: the union re-read
-    # below goes through geobidi, which the span path above documents as
-    # wrong for LTR (applying it to every cell re-rendered 13 of 23 golden
-    # fixtures). Without a re-read a merge could only DELETE the cells it
-    # swallowed, which is exactly how this first broke the postgres fixture.
-    _merge_of: dict[int, list] = {}
-    if _region_rtl and page is not None:
-        for _cs in _by_row.values():
-            for _run in _merged_runs(_cs, fills):
-                if len(_run) > 1:
-                    for _c in _run:
-                        _merge_of[id(_c)] = _run
-
     for cell in region.cells:
         # Scoped to RTL cells: this is a bidi ordering bug, and the span
         # path is correct for LTR. Applied to every cell it re-rendered
@@ -415,15 +346,10 @@ def _table_grid(region: Region, owned: dict[int, list],
         # Not gated on the cell being empty: a welded row leaves each cell
         # holding whatever fragment happened to fit, so "has some lines" is
         # exactly the damaged state, not evidence the cell is fine.
-        _run = _merge_of.get(id(cell))
-        if _run is not None or (_welded and _region_rtl and page is not None
-                                and rtl_cell):
+        if _welded and _region_rtl and page is not None and rtl_cell:
             try:
                 from . import geobidi as _gb
-                _rect = cell.bbox if _run is None else (
-                    min(c.bbox[0] for c in _run), min(c.bbox[1] for c in _run),
-                    max(c.bbox[2] for c in _run), max(c.bbox[3] for c in _run))
-                cell_lines = _gb.page_lines(page, clip=_rect)
+                cell_lines = _gb.page_lines(page, clip=cell.bbox)
             except Exception:
                 cell_lines = []
         if (not cell_lines and not (cell.spans or []) and page is not None
@@ -455,12 +381,6 @@ def _table_grid(region: Region, owned: dict[int, list],
                 text = f"{mark} {text}"
         diags["reversed_lines"] += d.get("reversed_lines", 0)
         diags["presentation_forms"] += d.get("presentation_forms", 0)
-        # The merged text belongs to the run once, not once per cell. Blank
-        # the rest ONLY when the union actually produced text, so a failed
-        # re-read can never erase what the cells already held.
-        if _run is not None and text.strip():
-            if cell.table_col != min(c.table_col for c in _run):
-                text = ""
         grid[cell.table_row][cell.table_col] = text.strip()
 
     # Drop wholly-empty rows and columns. Borderless-table column/row
