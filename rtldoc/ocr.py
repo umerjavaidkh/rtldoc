@@ -15,6 +15,7 @@ born-digital page's own paragraph blocks use.
 from __future__ import annotations
 
 import csv
+import re
 import shutil
 import statistics
 import subprocess
@@ -143,6 +144,12 @@ def detect_script(page: "object", dpi: int = 150) -> str | None:
 # size.
 RULE_READ_HEIGHT_MULT = 2.0
 RULE_READ_CONF_FRAC = 0.6
+# A line the recogniser itself barely believes -- under a third of the
+# confidence it gave the rest of this page.
+DISBELIEVED_CONF_FRAC = 0.35
+# Arabic does not write the same letter three times running. Tatweel
+# (U+0640, the kashida) does elongate, and is excluded here.
+_IMPOSSIBLE_REPEAT = re.compile(r"([\u0621-\u063f\u0641-\u064a])\1{2,}")
 
 
 def _drop_rule_reads(lines: dict) -> dict:
@@ -166,10 +173,22 @@ def _drop_rule_reads(lines: dict) -> dict:
     a larger face. Requiring BOTH is what protects a heading: a genuine
     large line is read confidently and stays.
 
-    Corroboration that the 9 are unreadable rather than badly read: 5 of
-    them repeat one Arabic letter three or more times, which real Arabic
-    does not do -- 22 occurrences in 341,534 born-digital tokens across
-    30 documents (0.006%), and each of those 22 is itself corrupt.
+    Height alone misses the flat decorations -- a dotted leader or a thin
+    frame produces a normal-height line at 0.00-0.20 of the page's
+    confidence. So a second, independent test drops any line the
+    recogniser barely believes. Over 30 scanned pages (1,091 lines) the
+    two populations do not overlap in the middle: lines carrying an
+    impossible letter-repeat sit at a median 0.21 of the page's
+    confidence, every other line at 0.97, with a tenth percentile of
+    0.85.
+
+    The impossible repeat itself is applied per WORD, never per line.
+    Arabic does not write one letter three times running -- 22
+    occurrences in 341,534 born-digital tokens across 30 documents
+    (0.006%), and each of those 22 is itself corrupt -- but a rule read
+    can be merged into the same OCR line as real text, and the highest
+    confidence line carrying one (0.80) is a real sentence with junk
+    appended. Dropping that line would lose the sentence.
     """
     if not lines:
         return lines
@@ -184,7 +203,11 @@ def _drop_rule_reads(lines: dict) -> dict:
         c = sum(w["conf"] for w in ws) / len(ws)
         if h > RULE_READ_HEIGHT_MULT * med_h and c < RULE_READ_CONF_FRAC * med_c:
             continue
-        kept[key] = ws
+        if c < DISBELIEVED_CONF_FRAC * med_c:
+            continue
+        ws = [w for w in ws if not _IMPOSSIBLE_REPEAT.search(w["text"])]
+        if ws:
+            kept[key] = ws
     return kept
 
 
