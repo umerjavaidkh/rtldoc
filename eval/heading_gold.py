@@ -56,6 +56,20 @@ TOUGH = [
      "three heading levels"),
     ("corpus_large/publisher__latin/c51b97c8_irs_p561.pdf",
      "IRS publication, two columns + tables"),
+    # Second wave. The first eight gave 72 labels, too few to fit anything and
+    # too narrow to hold out from: 137 of the 149 usable positives came from a
+    # single file. These seven widen the producers and the heading styles.
+    ("book/BilArabi_TG07.pdf", "Arabic teacher's guide, coloured band headings"),
+    ("corpus_gulf/8a1fac72_book-Statistics-2018.pdf",
+     "borderless statistical tables, bilingual heads"),
+    ("corpus_gulf/325b88ed_Statistical-Yearbook-2023.pdf",
+     "yearbook, headings inside coloured bands"),
+    ("corpus_gulf/bfbfbbac_healthybook.pdf", "health handbook, mixed styles"),
+    ("corpus_gulf/f6f9913d_AnnualReport2021.pdf",
+     "annual report, display type that is not headings"),
+    ("corpus_gulf/3739b6b1_2020_Khibrat_Guide_AR.pdf", "guide, numbered sections"),
+    ("corpus_large/web_print__arabic/15a1fefa_arwiki_iraq.pdf",
+     "wiki print, three heading levels"),
 ]
 PAD = 14.0
 ZOOM = 2.0
@@ -114,7 +128,10 @@ def sample(out: Path, per_doc: int = 9) -> dict:
                 if b.role in ("table", "figure"):
                     continue
                 text = (b.text or "").strip()
-                if not text or len(text) > 160:
+                # A one- or two-character block is a page number, a list
+                # marker or a chip -- never a heading, and its crop renders as
+                # an apparently empty box that costs a human a decision.
+                if not text or len(text) > 160 or len(text.strip()) < 3:
                     continue
                 is_head = (b.role or "").startswith("heading")
                 short_rare = (len(text) <= 80 and b.style != body_style
