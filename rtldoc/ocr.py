@@ -117,7 +117,24 @@ def ocr_page(page: "object", dpi: int = 300, lang: str | None = None) -> list[tu
         out_base = Path(tmp) / "out"
         try:
             subprocess.run(
-                ["tesseract", str(img_path), str(out_base), "-l", lang, "tsv"],
+                # --psm 6: treat the page as one uniform block of text.
+                #
+                # The default (psm 3) runs full page segmentation, and on a
+                # scan that means tesseract tries to READ the decorations: a
+                # ruled line comes back as "ااا ااا اا", a page border as
+                # "|||", and decorative marks as English -- 90 characters of
+                # "enone nena enenenenenenene" on p3 of the scanned Saudi
+                # labour regulation.
+                #
+                # This is the one thing EasyOCR does better architecturally:
+                # it detects text regions first and recognises only those, so
+                # it never reads a rule. psm 6 gets most of that for free.
+                # Measured over three scanned pages: Latin junk 65 -> 42,
+                # single-character repeat junk 7 -> 1, real Arabic words
+                # 1684 -> 1729, and 24.2s -> 21.1s. Less noise, MORE text,
+                # and faster -- EasyOCR itself is 4x too slow at 30s/page.
+                ["tesseract", str(img_path), str(out_base), "-l", lang,
+                 "--psm", "6", "tsv"],
                 check=True, capture_output=True, timeout=120,
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
