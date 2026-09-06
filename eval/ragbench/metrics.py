@@ -511,29 +511,46 @@ def page_integrity(result, source_text: str) -> Score:
 # 4. Structure & Hierarchy  (heading path = chunk metadata)
 # --------------------------------------------------------------------------
 
-def structure_score(blocks: list, spans: list, beta: float = 0.5) -> Score:
-    """Headings, scored with an F-beta that punishes false positives.
+def structure_score(blocks: list, spans: list, beta: float = 0.5,
+                    declared: list | None = None) -> Score:
+    """Headings, scored against what the FILE declares -- or not scored at all.
 
-    beta = 0.5, following ParseBench's styling metric: a heading invented from
-    a paragraph poisons the breadcrumb of every chunk beneath it, while a
-    missed heading only costs context on its own section. The asymmetry is
-    real, so the metric carries it."""
+    This used to define a heading as "text set >= 1.25x the median span size",
+    which is not a definition of a heading, it is a definition of big text. It
+    punished the parser twice over: a heading set SMALLER than body counted as
+    a false positive -- the Saudi labour regulation sets all 281 of its section
+    heads that way -- and any large text that is not a heading, a pull quote or
+    a figure number or a logo, counted as a heading we had missed.
+
+    The gap it produced was not small. Against hand-adjudicated labels the same
+    parser scores F1 0.889 (n=72); against the font-size rule it scored 58.7%,
+    which made heading detection look like the project's worst problem when it
+    is mostly the project's worst MEASUREMENT.
+
+    So the truth now comes from /H1../H6 in the structure tree -- the
+    producer's own declaration, which owes nothing to font size -- passed in as
+    `declared`. A document that carries no structure tree cannot be scored this
+    way and is reported as n=0, i.e. unmeasured, rather than being given a
+    number derived from its font sizes. Ten of the eighteen Gulf documents
+    carry a tree; the rest are honestly blank.
+    """
     headings = [b for b in blocks if (b.role or "").startswith("heading")]
-    sizes = [round(s[0], 1) for s in spans if s[2].strip()]
-    if not sizes:
-        return Score(1.0, 0, {"note": 0.0})
-
-    sizes_sorted = sorted(sizes)
-    body = sizes_sorted[len(sizes_sorted) // 2]
-    big_spans = [s for s in spans if s[2].strip() and s[0] >= body * 1.25]
-
-    # true positives: emitted headings whose text really is set larger than body
-    big_text = R.normalize(" ".join(s[2] for s in big_spans))
-    tp = sum(1 for h in headings
-             if h.text.strip() and R.normalize(h.text)[:40] in big_text)
-    fp = len(headings) - tp
-    fn = max(0, len({R.normalize(s[2])[:40] for s in big_spans if s[2].strip()})
-             - tp)
+    if declared is None:
+        return Score(0.0, 0, {"note": 0.0}, ["no structure tree: unmeasured"])
+    truth = [R.normalize(t)[:40] for t in declared if t and t.strip()]
+    if not truth and not headings:
+        return Score(1.0, 0, {"declared": 0})
+    got = [R.normalize(h.text)[:40] for h in headings if h.text.strip()]
+    unmatched = list(truth)
+    tp = 0
+    for g in got:
+        for i, t in enumerate(unmatched):
+            if g == t or (g and t and (g in t or t in g)):
+                tp += 1
+                unmatched.pop(i)
+                break
+    fp = len(got) - tp
+    fn = len(unmatched)
 
     precision = _safe(tp, tp + fp)
     recall = _safe(tp, tp + fn)

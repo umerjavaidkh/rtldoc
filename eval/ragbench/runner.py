@@ -22,7 +22,7 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_ROOT))
 
 import fitz  # noqa: E402
-from rtldoc import pipeline  # noqa: E402
+from rtldoc import tags, pipeline  # noqa: E402
 
 from eval.ragbench import chunking, metrics, retrieval, rules  # noqa: E402
 
@@ -44,6 +44,17 @@ def score_document(path: str, max_pages: int = 0) -> dict:
 
     all_blocks, all_truth_records, all_pred_records = [], [], []
     page_scores = collections.defaultdict(list)
+    # /H1../H6 per page, or None when the file carries no structure tree -- see
+    # metrics.structure_score, which then reports headings as unmeasured.
+    _declared_by_page = None
+    try:
+        _d = tags.tagged_headings(doc)
+        if _d:
+            _declared_by_page = collections.defaultdict(list)
+            for _pno, _lvl, _mc in _d:
+                _declared_by_page[_pno].append(_mc)
+    except Exception:
+        _declared_by_page = None
     page_rect = (0, 0, 612, 792)
 
     for i in range(n):
@@ -97,7 +108,13 @@ def score_document(path: str, max_pages: int = 0) -> dict:
         spans = [(s["size"], s["font"], s["text"], s["bbox"])
                  for blk in raw.get("blocks", []) if blk.get("type") == 0
                  for ln in blk.get("lines", []) for s in ln.get("spans", [])]
-        page_scores["structure"].append(metrics.structure_score(result.blocks, spans))
+        _decl = None
+        if _declared_by_page is not None:
+            texts = tags.mcid_text(page)
+            _decl = [" ".join(texts.get(m, "") for m in mc).strip()
+                     for mc in _declared_by_page.get(i, [])]
+        page_scores["structure"].append(
+            metrics.structure_score(result.blocks, spans, declared=_decl))
         page_scores["page_integrity"].append(
             metrics.page_integrity(result, page.get_text()))
         page_scores["citability"].append(
