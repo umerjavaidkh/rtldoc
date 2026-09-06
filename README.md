@@ -32,15 +32,29 @@ and vector tables.
 
 ## Proven at scale
 
-Tested on **119 PDFs / 13,557 pages** it never saw during development, plus a
-separate **18-document / 2,283-page Gulf corpus** (Saudi and UAE statistical
-yearbooks, labour regulations, HR policy and service manuals) used as the
-standing regression set — an
-Arabic teacher's guide, two SEC 10-Ks, 96+ arXiv papers (15 fields), 5 OpenStax
-physics/chemistry/calculus textbooks (figures, geometry, exercises), the
-3,130-page PostgreSQL 18 manual (deeply-nested reference tables, code blocks),
-and a growing set of real-world forms, reports, and scanned documents.
-The checks are *property-based and label-free*, so they scale to any corpus:
+The development corpus is **1,751 PDFs / 63,273 pages**: an Arabic teacher's
+guide, two SEC 10-Ks, 96+ arXiv papers across 15 fields, 5 OpenStax
+physics/chemistry/calculus textbooks, the 3,130-page PostgreSQL 18 manual,
+~1,500 web-print and publisher documents in Arabic and Latin script, and a
+growing set of real-world forms, reports and scans.
+
+Two of those are **standing regression sets**, re-measured on every change and
+reported in full below rather than sampled:
+
+| set | documents | pages | what it is |
+|---|---:|---:|---|
+| `corpus_gulf` | 18 | 2,283 | Saudi/UAE statistical yearbooks, labour regulations, service manuals |
+| `corpus_hr` | 12 | 676 | HR policy and labour-law documents, **never tuned against** |
+
+Plus 23 frozen cell-level table fixtures (`eval/golden/`) and 17 unit tests,
+which gate every commit.
+
+The checks are *property-based and label-free*, so they scale to any corpus --
+run them yourself on anything, no labels needed:
+
+```bash
+python eval/invariants.py corpus_gulf/          # recurses for *.pdf
+```
 
 | Property (must hold on every page) | Result |
 |---|---:|
