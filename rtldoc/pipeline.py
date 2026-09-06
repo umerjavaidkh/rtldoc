@@ -1578,10 +1578,32 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
             # and remember it so the diagram detector, which skips
             # table-claimed areas, can still describe the shapes there.
             if not text.strip():
+                # A table that yields no grid must degrade to TEXT, not to
+                # nothing. Dropping the region drops whatever it owns, and a
+                # page's decorative border makes a "table" region covering the
+                # whole page: on an HR policy manual that silently discarded
+                # every one of 59 text spans on 8 of 19 pages -- 3,764
+                # characters of a born-digital page emitted as zero.
+                #
+                # Still dropped when the prose path finds nothing either, which
+                # is the case the original guard was written for (a flowchart's
+                # connector lines clustering into an empty 1-cell grid).
                 dropped_tables.add(id(r))
-                continue
-            table_grids[id(r)] = grid
-            q = 3
+                if geo_lines:
+                    text, diag = _region_text_geo(r, owned.get(id(r), []), opts)
+                    q = 2
+                    if not text and r.spans:
+                        text, diag = _region_text(r, opts)
+                        q = 1
+                else:
+                    text, diag = _region_text(r, opts)
+                    q = 1
+                if not text.strip():
+                    continue
+                grid = None
+            else:
+                table_grids[id(r)] = grid
+                q = 3
         elif geo_lines:
             text, diag = _region_text_geo(r, owned.get(id(r), []), opts)
             q = 2
