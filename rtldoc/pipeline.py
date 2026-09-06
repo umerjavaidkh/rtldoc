@@ -1303,6 +1303,17 @@ def _declared_ranks(page: "fitz.Page") -> list[tuple[tuple[float, float], int]]:
 COL_COUNT_DISAGREE = 2
 
 
+def _same_column_shape(regions: list) -> bool:
+    """Do these regions look like slices of a single table?"""
+    widths = set()
+    for r in regions:
+        cols = {c.table_col for c in (r.cells or []) if c.table_col is not None}
+        if not cols:
+            return False
+        widths.add(max(cols) + 1)
+    return len(widths) == 1
+
+
 def _adopt_found_tables(regions: list, page) -> list:
     """Take the table REGION from PyMuPDF, and build its cells ourselves.
 
@@ -1394,6 +1405,15 @@ def _adopt_found_tables(regions: list, page) -> list:
                 cells.append(Region(bbox=(x0, y0, x1, y1), kind="table_cell",
                                     table_row=ri, table_col=ci))
         if len(cells) < 4:
+            continue
+        if len(ours) > 1 and not _same_column_shape(ours):
+            # Several tables inside one box are not always one table cut up.
+            # A service card holds genuinely separate sub-tables -- fees,
+            # channels, eligibility -- stacked in a frame, and the UAE
+            # manual's p19 truth is the 4x3 fee table ALONE. Merging them
+            # destroyed an exact match and cost 0.57 there, 0.46 on p25 and
+            # 0.36 on p21. Pieces of ONE table share their column edges;
+            # separate sub-tables do not, so only the former are merged.
             continue
         for r in ours:
             out.remove(r)
