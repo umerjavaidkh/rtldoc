@@ -9,7 +9,7 @@ from pathlib import Path
 
 from eval.ragbench.metrics import DIMENSIONS
 
-_SHORT = {"structure": "HEADING", "table_record_fidelity": "TABLE",
+_SHORT = {"structure": "HEADING", "table_detection": "TBL-FOUND", "table_record_fidelity": "TABLE",
           "content_faithfulness": "TEXT", "page_integrity": "PAGE",
           "reading_order": "COLUMN",
           "citability": "CITATION"}

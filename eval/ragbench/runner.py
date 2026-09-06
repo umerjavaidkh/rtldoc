@@ -79,6 +79,11 @@ def score_document(path: str, max_pages: int = 0) -> dict:
         # hand-verified gold set, where pooling read 51.8% and per-table
         # matching read 63.8% on identical output.
         pred_tables = metrics.tables_from_markdown(md) or [[]]
+        # Page-level: was the table FOUND at all, once. Robust to the
+        # reference's own header and ordering errors -- see table_detection.
+        if truth.record_groups or any(pred_tables):
+            page_scores["table_detection"].append(
+                metrics.table_detection(truth.record_groups, pred_tables))
         for group in truth.record_groups:
             best = max((metrics.table_record_fidelity(group, cand)
                         for cand in pred_tables), key=lambda sc: sc.value)
@@ -105,8 +110,9 @@ def score_document(path: str, max_pages: int = 0) -> dict:
     doc_out["chunks"] = len(chunks)
 
     dims = {}
-    for name in ("content_faithfulness", "structure", "table_record_fidelity",
-                 "page_integrity", "citability", "reading_order"):
+    for name in ("content_faithfulness", "structure", "table_detection",
+                 "table_record_fidelity", "page_integrity", "citability",
+                 "reading_order"):
         got = page_scores.get(name, [])
         live = [s for s in got if s.n > 0]
         dims[name] = metrics.Score(

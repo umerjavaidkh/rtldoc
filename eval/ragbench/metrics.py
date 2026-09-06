@@ -243,6 +243,37 @@ def _cell_equal(a: str, b: str) -> bool:
     return False
 
 
+def table_detection(truth_groups: list, pred_tables: list) -> Score:
+    """Did the page's table get FOUND, once, regardless of cell fidelity.
+
+    table_record_fidelity asks whether every row matches, and against this
+    reference that is often unanswerable: the reference builds its records from
+    the raw word stream, so its headers come back as fragments in visual order
+    and it routinely takes the loose band rows above a table as the header row.
+    Confirmed on the UAE service manual p18, where the reference's header is
+    ['ال ينطبق', 'الغرامات', 'فقط', 'رسوم الإصدار'] -- decorative bands above
+    the table -- and rtldoc's own 5x3 grid of the same table scores 0.0 while
+    being visibly correct.
+
+    A detection rate is robust to all of that. It answers the question an
+    ingestion pipeline actually asks first -- is there a table here and did we
+    emit one -- and it cannot be zeroed by the reference disagreeing about
+    where a header is. Reported alongside fidelity, not instead of it: finding
+    a table and reading it correctly are different claims and both matter.
+    """
+    want = len(truth_groups)
+    got = len([t for t in pred_tables if t])
+    if not want:
+        # RECALL only. Scoring a page where the reference has no table would
+        # punish rtldoc for finding tables the reference cannot see -- it reads
+        # only RULED grids, and most of the Gulf corpus is set with coloured
+        # bands or nothing at all. Precision against an incomplete reference is
+        # not a measurement, it is a penalty for being better than it.
+        return Score(1.0, 0, {"truth_tables": 0, "pred_tables": got})
+    hit = 1.0 if got else 0.0
+    return Score(hit, 1, {"truth_tables": want, "pred_tables": got},
+                 [] if hit else ["reference has a table, none emitted"])
+
 def table_record_fidelity(truth_records: list, pred_records: list) -> Score:
     """TableRecordMatch: optimal matching between true and predicted records,
     normalised by max(|G|,|P|) so both dropped and invented rows are punished.
@@ -598,7 +629,7 @@ def citability(chunks: list, blocks: list, page_rect: tuple) -> Score:
     return Score(passes / n, n, parts, failures)
 
 
-DIMENSIONS = ("structure", "table_record_fidelity", "content_faithfulness",
+DIMENSIONS = ("structure", "table_detection", "table_record_fidelity", "content_faithfulness",
               "reading_order", "page_integrity", "citability")
 
 
