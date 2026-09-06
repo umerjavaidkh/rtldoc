@@ -1299,6 +1299,108 @@ def _declared_ranks(page: "fitz.Page") -> list[tuple[tuple[float, float], int]]:
         return []
 
 
+# Adopt PyMuPDF's column geometry only on a real disagreement.
+COL_COUNT_DISAGREE = 2
+
+
+def _adopt_found_tables(regions: list, page) -> list:
+    """Take the table REGION from PyMuPDF, and build its cells ourselves.
+
+    Two failures this fixes, both measured over 273 pages of six Gulf
+    documents:
+
+      * we find nothing where a table plainly is. A 16:9 report slide draws
+        its table as coloured blocks with 8 horizontal rules and NO vertical
+        ones, so the ruled detector sees no columns, the borderless detector
+        sees no alignment, and the page-level projection fallback is refused
+        by its numeric gate -- the table is statuses and channels, 2% numeric
+        against a 30% bar. 10 such pages, 4 of them in that one report.
+
+      * we shatter one table into several. On 46 pages we emit more tables
+        than PyMuPDF does, and on 33 of those (72%) a SINGLE one of its
+        bounding boxes contains every fragment we produced -- the UAE service
+        manual's p17 came out as 5 tables where the document has one 11-column
+        card. Fragmentation is the largest single cause of lost cells,
+        43% of the shortfall.
+
+    What is adopted is only the geometry. PyMuPDF's own cell TEXT scores
+    0.273 on 43 hand-verified tables against this parser's 0.625 -- it has no
+    bidi resolution and no Arabic repair -- so its rectangles are filled by
+    the same span and line path as every other table here.
+
+    It never removes a table: on 12 pages we found one PyMuPDF did not, and
+    those are left exactly as they are.
+    """
+    if page is None:
+        return regions
+    try:
+        found = page.find_tables(strategy="lines").tables
+    except Exception:
+        return regions
+    if not found:
+        return regions
+
+    def _inside(bb, outer, pad=6.0):
+        return (bb[0] >= outer[0] - pad and bb[1] >= outer[1] - pad
+                and bb[2] <= outer[2] + pad and bb[3] <= outer[3] + pad)
+
+    out = list(regions)
+    for t in found:
+        try:
+            bbox = tuple(float(v) for v in t.bbox)
+            rows = t.rows
+        except Exception:
+            continue
+        if bbox[2] - bbox[0] <= 0 or bbox[3] - bbox[1] <= 0:
+            continue
+        ours = [r for r in out if r.kind == "table" and _inside(r.bbox, bbox)]
+        if len(ours) == 1:
+            # We found the table -- but did we find its SHAPE? A report
+            # slide's p11 comes out 8 columns wide against PyMuPDF's 6,
+            # because the date column is sliced into three ("تار", "ريخ",
+            # "خ البدء" from one "تاريخ البدء"). Adopt the geometry only
+            # when the two disagree by more than one column; a small
+            # difference is usually our extra marker column, which is real.
+            try:
+                mine = max((c.table_col for c in (ours[0].cells or [])
+                            if c.table_col is not None), default=-1) + 1
+            except Exception:
+                continue
+            if mine and abs(mine - int(t.col_count)) < COL_COUNT_DISAGREE:
+                continue
+        # PyMuPDF describes a row only as far as the page DRAWS it. On the
+        # report slide the coloured bands cover the first column alone, so
+        # every data row comes back with one cell and five Nones, and a grid
+        # built from that is empty everywhere but column 0. The columns are
+        # not missing, though -- the header row states all six. Take the
+        # column edges from whichever row is described most fully and give
+        # them to every row.
+        cols = None
+        for row in rows:
+            cs = [c for c in (getattr(row, "cells", []) or []) if c]
+            if cols is None or len(cs) > len(cols):
+                cols = cs
+        if not cols or len(cols) < 2:
+            continue
+        edges = [(float(c[0]), float(c[2])) for c in cols]
+        cells = []
+        for ri, row in enumerate(rows):
+            present = [c for c in (getattr(row, "cells", []) or []) if c]
+            if not present:
+                continue
+            y0 = min(float(c[1]) for c in present)
+            y1 = max(float(c[3]) for c in present)
+            for ci, (x0, x1) in enumerate(edges):
+                cells.append(Region(bbox=(x0, y0, x1, y1), kind="table_cell",
+                                    table_row=ri, table_col=ci))
+        if len(cells) < 4:
+            continue
+        for r in ours:
+            out.remove(r)
+        out.append(Region(bbox=bbox, kind="table", cells=cells))
+    return out
+
+
 def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
                opts: arabic.NormalizeOptions | None = None,
                geometry_bidi: bool = True, visual_summary: bool = False) -> PageResult:
@@ -1373,6 +1475,7 @@ def parse_page(page: "fitz.Page", style_map: dict[str, str] | None = None,
     nested = nested_page_rect(prim)
     _sides = _per_side = None
     regions = propose_regions(prim)
+    regions = _adopt_found_tables(regions, page)
     if _sides is not None:
         # Span assignment must respect the split too: run against the whole
         # page it re-pools spans from both sides into whichever region is
