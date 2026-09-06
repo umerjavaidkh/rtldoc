@@ -274,6 +274,9 @@ def _strip_repeated_activity_number(blocks: list["Block"]) -> None:
 
 
 PROJECTION_MIN_COLS = 2     # below this, the rule path has not found a table
+FALLBACK_MAX_COLS = 10      # more columns than this, from no rules, is confetti
+FALLBACK_MIN_FILL = 0.45
+FALLBACK_MAX_SINGLE_WORD = 0.85
 
 
 def _projection_lines(page, bbox):
@@ -358,6 +361,36 @@ def _projection_lines(page, bbox):
             lines.append((spans, round(y0, 1), round(y1, 1)))
     lines.sort(key=lambda l: l[1])
     return lines
+
+
+def _grid_is_tabular(grid) -> bool:
+    """Is this a table, or prose that whitespace projection sliced into columns?
+
+    The fallback fires wherever the drawn rules described no columns -- and a
+    page whose only rules are its decorative BORDER looks exactly like that.
+    Projected, its prose comes back as a 25x13 grid holding one word per cell:
+    confirmed on an HR regulation whose pages of running text
+    ("مادة (1): تسري أحكام هذه اللائحة على جميع العاملين") were emitted as
+    13- and 15-column tables, and which pushed table_false from 91 to 130
+    across the Gulf corpus.
+
+    A real table fills its cells and does not have fifteen of them. Prose
+    shattered this way is mostly empty, because each source line only reaches
+    a few of the invented columns.
+    """
+    if not grid:
+        return False
+    ncols = max(len(r) for r in grid)
+    cells = [c for r in grid for c in r]
+    filled = [c for c in cells if c and c.strip()]
+    if not filled:
+        return False
+    fill = len(filled) / max(len(cells), 1)
+    if ncols > FALLBACK_MAX_COLS or fill < FALLBACK_MIN_FILL:
+        return False
+    # a table's cells hold values, not single words of a sentence
+    singles = sum(1 for c in filled if len(c.split()) == 1)
+    return singles / len(filled) < FALLBACK_MAX_SINGLE_WORD or ncols <= 4
 
 
 def _projection_grid(page, bbox):
@@ -779,8 +812,15 @@ def _table_grid(region: Region, owned: dict[int, list],
     if page is not None and (not out or max((len(r) for r in out), default=0)
                              < PROJECTION_MIN_COLS):
         alt = _projection_grid(page, region.bbox)
-        if alt is not None:
+        if alt is not None and _grid_is_tabular(alt):
             return alt, diags
+    # A single-column grid is not a table. These come from a page's decorative
+    # BORDER: the frame is two long rules, detect_tables reads a region from
+    # them spanning the whole page, and a page of running text inside it
+    # collapses to one cell. Confirmed on an HR regulation where every prose
+    # page reported a 1x1 "table".
+    if max((len(r) for r in out), default=0) < 2:
+        return [], diags
     return out, diags
 
 
