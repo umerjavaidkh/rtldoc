@@ -963,7 +963,13 @@ def _is_bare_label(text: str) -> bool:
     t = (text or "").strip()
     if not t or "\n" in t or len(t) > 60:
         return False
-    return not t.endswith((".", "،", "؛", ";", ":", "-"))
+    # A COLON is not terminal punctuation -- it is the opposite. A full stop
+    # ends a sentence; a colon announces that what follows belongs to the line
+    # before it, which is exactly what a heading does. Arabic textbooks and
+    # government documents write section heads this way constantly
+    # ("استراتيجيّة الجدول الذاتيّ:", "المعايير:"), and treating the colon as
+    # disqualifying missed every one of them.
+    return not t.endswith((".", "،", "؛", ";", "-"))
 
 
 def _looks_like_prose(text: str) -> bool:
