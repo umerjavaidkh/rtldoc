@@ -93,6 +93,23 @@ def detect_script(page: "object", dpi: int = 150) -> str | None:
     return None
 
 
+def parse_tsv(text: str) -> list[dict]:
+    """Read tesseract's TSV output.
+
+    quoting=QUOTE_NONE is load-bearing, not tidiness. Tesseract's TSV is
+    not quoted CSV: it never escapes anything, it just writes the
+    recognised characters into the text column. When OCR reads one glyph
+    as a bare double quote -- which a scan's tick marks, hamza and dotted
+    form rules routinely produce -- csv's default quotechar swallows
+    every following row into that one field until the next quote appears.
+    One stray quote on p92 of the scanned Saudi labour regulation ate 191
+    of the page's 327 word rows and re-emitted them as an 8,148-character
+    wall of raw TSV rendered as body text.
+    """
+    return list(csv.DictReader(text.splitlines(), delimiter="\t",
+                               quoting=csv.QUOTE_NONE))
+
+
 def ocr_page(page: "object", dpi: int = 300, lang: str | None = None) -> list[tuple[str, tuple]]:
     """Render `page` and OCR it. Returns a list of (text, bbox) paragraphs
     in reading order (top-to-bottom). Empty if tesseract isn't installed,
@@ -142,18 +159,7 @@ def ocr_page(page: "object", dpi: int = 300, lang: str | None = None) -> list[tu
         tsv_path = out_base.with_suffix(".tsv")
         if not tsv_path.exists():
             return []
-        # quoting=QUOTE_NONE is load-bearing, not tidiness. Tesseract's TSV
-        # is not quoted CSV: it never escapes anything, it just writes the
-        # recognised characters in the text column. When OCR reads one
-        # glyph as a bare double quote -- which a scan's tick marks,
-        # hamza and ditto marks routinely produce -- csv's default
-        # quotechar swallows every following row into that one field until
-        # the next quote appears. One stray quote on p92 of the Saudi
-        # labour regulation ate 191 of the page's 327 rows and emitted
-        # them as an 8,148-character wall of raw TSV in the page text.
-        rows = list(csv.DictReader(tsv_path.read_text(encoding="utf-8", errors="replace")
-                                   .splitlines(), delimiter="\t",
-                                   quoting=csv.QUOTE_NONE))
+        rows = parse_tsv(tsv_path.read_text(encoding="utf-8", errors="replace"))
 
     words = []
     for r in rows:
