@@ -489,7 +489,15 @@ def arabic_defects(probe: PageProbe) -> list[Finding]:
                            f"{len(leaks)} presentation-form codepoint(s) in output",
                            "".join(leaks[:20])))
     # A space inside an Arabic word: the reader sees the word cut in half.
-    splits = re.findall(r"[ء-ي]{1,2} [ء-ي]{1,2}(?=\s|$)", text)
+    # Anchored to WORD boundaries on both sides. Without the leading anchor
+    # the pattern matched the last two letters of any ordinary word followed by
+    # any short word -- "الإدارية أو" counted as the split "ية أو" -- and
+    # Arabic's two-letter function words (من في ما لا أو عن هو هي) are
+    # everywhere, so it fired constantly on correct text. Measured over the
+    # Gulf corpus: 619 matches unanchored against 65 anchored, an 89%
+    # over-count, which is most of why this was the corpus's largest defect
+    # class.
+    splits = re.findall(r"(?<![ء-ي])[ء-ي]{1,2} [ء-ي]{1,2}(?![ء-ي])", text)
     if len(splits) >= 3:
         out.append(Finding("arabic_word_split", "SOFT", probe.number,
                            f"{len(splits)} suspected false spaces inside words",
