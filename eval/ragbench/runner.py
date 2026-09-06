@@ -113,8 +113,16 @@ def score_document(path: str, max_pages: int = 0) -> dict:
             texts = tags.mcid_text(page)
             _decl = [" ".join(texts.get(m, "") for m in mc).strip()
                      for mc in _declared_by_page.get(i, [])]
-        page_scores["structure"].append(
-            metrics.structure_score(result.blocks, spans, declared=_decl))
+        # A page with no text layer cannot be scored for headings. OCR returns
+        # words and boxes and NO font, size or colour, so block.style is None
+        # and every heading rule has nothing to test -- measured on the scanned
+        # Saudi labour regulation, 46 OCR pages produced 0 headings while its 4
+        # born-digital pages produced them normally. Scoring those pages counts
+        # a structural impossibility as a parser failure. Scanned documents are
+        # out of scope (see CAPABILITIES.md) and are marked unmeasured here.
+        if result.born_digital:
+            page_scores["structure"].append(
+                metrics.structure_score(result.blocks, spans, declared=_decl))
         page_scores["page_integrity"].append(
             metrics.page_integrity(result, page.get_text()))
         page_scores["citability"].append(
