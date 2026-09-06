@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import shutil
+import statistics
 import subprocess
 import tempfile
 from pathlib import Path
@@ -136,6 +137,57 @@ def detect_script(page: "object", dpi: int = 150) -> str | None:
     return None
 
 
+# A line is a read of a printed rule, not of text, when it is far taller
+# than the page's own writing AND far less certain than it. Both bars are
+# read off the page itself, so they travel to any scan resolution or type
+# size.
+RULE_READ_HEIGHT_MULT = 2.0
+RULE_READ_CONF_FRAC = 0.6
+
+
+def _drop_rule_reads(lines: dict) -> dict:
+    """Drop OCR lines that are tesseract reading the page's decorations.
+
+    A scan's rules, borders and banner edges are ink, so tesseract tries
+    to read them, and it answers with letters: `ال اس لللبللللللللللنتنناتم`
+    for one rule on p7 of the Saudi labour regulation. That is not a
+    recognition this parser can repair -- there is no text under it.
+
+    Two measurements separate those reads from real ones, and both are
+    taken against the page's own median rather than a fixed number:
+
+      * height. The box tesseract fits over a rule spans the decoration,
+        so it comes out around 95px where the page's writing is 38.
+      * confidence. The rule reads score 6-38 where the page's text
+        scores 69-96.
+
+    Over 20 scanned pages (750 lines) this drops 9 lines, every one junk,
+    and keeps the three lines that are tall but confident -- real text in
+    a larger face. Requiring BOTH is what protects a heading: a genuine
+    large line is read confidently and stays.
+
+    Corroboration that the 9 are unreadable rather than badly read: 5 of
+    them repeat one Arabic letter three or more times, which real Arabic
+    does not do -- 22 occurrences in 341,534 born-digital tokens across
+    30 documents (0.006%), and each of those 22 is itself corrupt.
+    """
+    if not lines:
+        return lines
+    all_words = [w for ws in lines.values() for w in ws]
+    med_h = statistics.median(w["bbox"][3] - w["bbox"][1] for w in all_words)
+    med_c = statistics.median(w["conf"] for w in all_words)
+    if med_h <= 0 or med_c <= 0:
+        return lines
+    kept = {}
+    for key, ws in lines.items():
+        h = statistics.median(w["bbox"][3] - w["bbox"][1] for w in ws)
+        c = sum(w["conf"] for w in ws) / len(ws)
+        if h > RULE_READ_HEIGHT_MULT * med_h and c < RULE_READ_CONF_FRAC * med_c:
+            continue
+        kept[key] = ws
+    return kept
+
+
 def parse_tsv(text: str) -> list[dict]:
     """Read tesseract's TSV output.
 
@@ -218,6 +270,7 @@ def ocr_page(page: "object", dpi: int = 300, lang: str | None = None) -> list[tu
             continue
         words.append({
             "text": text,
+            "conf": conf,
             "bbox": (x * scale, y * scale, (x + w) * scale, (y + h) * scale),
             # (block_num, par_num, line_num) -- tesseract's own layout
             # analysis already groups words into lines and paragraphs;
@@ -232,6 +285,9 @@ def ocr_page(page: "object", dpi: int = 300, lang: str | None = None) -> list[tu
     lines: dict[tuple, list[dict]] = {}
     for w in words:
         lines.setdefault(w["line_key"], []).append(w)
+    lines = _drop_rule_reads(lines)
+    if not lines:
+        return []
 
     paras: dict[tuple, list[tuple]] = {}
     line_rows = []
