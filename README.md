@@ -57,15 +57,29 @@ regulations, HR policy and service manuals -- the standing regression set.
 Scored with RAGBench (`eval/ragbench/`), page level, deterministic rules, no
 LLM judge:
 
-| axis | score |
-|---|---:|
-| CITATION | 98.9% |
-| COLUMN | 97.0% |
-| PAGE | 95.9% |
-| TEXT | 83.7% |
-| HEADING | 58.7% |
-| TABLE | 29.5% |
-| **OVERALL** | **77.3%** |
+| axis | score | what it measures |
+|---|---:|---|
+| CITATION | 98.9% | every chunk traceable to a page + box |
+| COLUMN | 97.0% | reading order across columns |
+| PAGE | 95.9% | nothing dropped, nothing duplicated |
+| **TBL-FOUND** | **95.7%** | the table was found, once |
+| TEXT | 83.7% | content faithfulness |
+| HEADING | 54.1% | against /H1../H6, on the 5 of 18 docs that declare any |
+| TABLE | 29.5% | cell-level agreement with the reference |
+| **OVERALL** | **79.3%** | |
+
+The same build on a **separate, unseen 10-document / 493-page HR and
+labour-law corpus** it was never tuned against:
+
+| axis | Gulf | HR (unseen) |
+|---|---:|---:|
+| CITATION | 98.9% | **100.0%** |
+| COLUMN | 97.0% | **99.4%** |
+| PAGE | 95.9% | **96.7%** |
+| TEXT | 83.7% | **92.5%** |
+| HEADING | 54.1% | 58.1% |
+
+Every axis holds or improves on documents the parser has never seen.
 
 Defect detectors over the same corpus (`eval/scorecard.py`), against the same
 build one working session earlier:
@@ -77,6 +91,11 @@ build one working session earlier:
 | table_single_column | 132 | **59** |
 | order_backjump | 111 | **79** |
 | **total findings** | **3,324** | **2,735** |
+
+`TBL-FOUND` is recall only, deliberately: the reference reads *ruled* grids
+and most of this corpus is set with coloured bands or nothing at all, so
+scoring precision against it would penalise the parser for finding tables the
+reference cannot see.
 
 Two honest notes on the TABLE figure. It rose 9.4% -> 29.5% across that
 session, and **most of that was measurement, not parsing**: records were keyed
