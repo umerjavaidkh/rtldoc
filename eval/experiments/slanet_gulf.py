@@ -1,7 +1,7 @@
 """SLANet+ geometry + rtldoc text, scored on the Gulf corpus against the
 same RAGBench reference that yields TABLE 31.2%."""
 import sys, glob, os, statistics; sys.path.insert(0,".")
-sys.path.insert(0,"/private/tmp/claude-501/-Users-umerjavaid-Documents-umerwork-AI-pdf-parser/999924f6-e6a0-4460-893a-bf2b496c73bd/scratchpad")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 import fitz
 from slanet import predict          # model wrapper, weights already pinned
 from rtldoc import pipeline

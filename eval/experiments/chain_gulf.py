@@ -1,7 +1,7 @@
 """Full chain on Arabic: layout model locates, SLANet+ structures, rtldoc reads.
 Scored against the same RAGBench reference that gives TABLE 31.2%."""
 import sys, glob, statistics; sys.path.insert(0,".")
-sys.path.insert(0,"/private/tmp/claude-501/-Users-umerjavaid-Documents-umerwork-AI-pdf-parser/999924f6-e6a0-4460-893a-bf2b496c73bd/scratchpad")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 import numpy as np, fitz
 from pathlib import Path
 from mineru.model.layout.pp_doclayoutv2 import PPDocLayoutV2LayoutModel

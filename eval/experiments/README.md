@@ -68,6 +68,26 @@ For production the same models exist under Apache-2.0 from their authors:
 vendored. The numbers above need re-confirming against the Apache-2.0
 weights before anything is built on them.
 
+## Reproducing the builds
+
+The HTML in `output_chain/` (layout model + SLANet+ + this parser's text)
+and `output_slanet/` (SLANet+ only) came from:
+
+```bash
+pip install "mineru[core]"          # evaluation only -- AGPL, never shipped
+python eval/experiments/gen_chain.py  corpus_gulf/<doc>.pdf output_chain/<doc>.html
+python eval/experiments/gen_slanet.py corpus_gulf/<doc>.pdf output_slanet/<doc>.html
+```
+
+Both patch `rtldoc.pipeline` in-process; nothing in `rtldoc/` is modified,
+and the rules remain the fallback wherever a model declines. Measured on
+the 2022 yearbook, the chain took pages carrying a table from 113 to 247
+and extracted table cells from 21,884 to 55,117 -- more content, with
+correctness on Arabic still unverified for want of ground truth.
+
+For a shippable path, `rapid_table` (Apache-2.0) provides the same
+SLANet+ weights without the licence problem.
+
 ## The scripts
 
 | file | what it answers |

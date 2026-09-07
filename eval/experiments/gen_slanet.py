@@ -3,7 +3,7 @@
 Monkeypatched in-process only; nothing in the repo changes.
 """
 import sys; sys.path.insert(0,".")
-sys.path.insert(0,"/private/tmp/claude-501/-Users-umerjavaid-Documents-umerwork-AI-pdf-parser/999924f6-e6a0-4460-893a-bf2b496c73bd/scratchpad")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 from rtldoc import pipeline
 import slanet
 
