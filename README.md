@@ -271,16 +271,36 @@ plus structured JSON, or a self-contained HTML page per PDF page.
   branches) get correct node/box detection but not yet reliable connection
   tracing — a harder, separate problem noted for future work.
 
-## Roadmap
+## Where rtldoc is strong, and where it is going
 
-- Reliable connection tracing for dense/branching diagrams (see above).
-- A page-level chart/figure classification pass, so bar charts, legends,
-  and gridlines are recognized and set aside before table/diagram
-  detection runs, rather than relying on those detectors' own guards to
-  reject them case by case.
-- A cell-level golden regression corpus (`eval/golden/` + `eval/regression.py`)
-  now exists and grows with each table-detection fix; still short of full
-  coverage across document types.
+**Arabic text is solved here and nowhere else.** Reading order, bidi,
+ligatures and kashida are rebuilt from glyph positions, and on the same
+Arabic document rtldoc recovers several times the text of a general
+parser, with none of the orthographic corruption that makes Arabic
+silently unsearchable. That is the part no layout model provides and no
+competitor publishes a number for.
+
+**Table structure is the open problem, and it is open for everyone.**
+rtldoc reads a table's cells almost perfectly once it knows where they
+are; locating them, and inferring the grid, is where it loses ground —
+and the general-purpose stack the field relies on does no better on
+Arabic. Latin tables are a solved problem; Arabic ones are not, by
+anybody.
+
+**The next step is an Arabic-first structure model.** No Arabic table or
+layout ground truth exists publicly today — that is the missing asset,
+and building it is what turns Arabic document structure from an open
+problem into rtldoc's. Everything already measured (`eval/`) is the
+harness that will judge it.
+
+Nearer term:
+
+- A page-level chart/figure classification pass, so bar charts, legends
+  and gridlines are set aside before table detection runs.
+- Correct handling of pages whose text is drawn rotated, where words are
+  currently split across reading lines.
+- Growing the cell-level golden corpus (`eval/golden/`, `eval/regression.py`)
+  toward full coverage across document types.
 
 ## Publishing a release (maintainers)
 
