@@ -28,3 +28,7 @@ eval/ragbench/gold*/sheets/
 eval/ragbench/gold*/review.html
 .claude/settings.local.json
 eval/ragbench/gold*/sheet.png
+
+# FinTabNet.c evaluation data (fetched, not vendored -- see eval/fintabnet_fetch.py)
+eval/fintabnet/pdfs/
+eval/fintabnet/gold/
