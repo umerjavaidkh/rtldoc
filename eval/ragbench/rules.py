@@ -339,53 +339,6 @@ def _merge_wrapped_rows(grid: list[list[str]]) -> list[list[str]]:
     return out
 
 
-_NUMERIC_CELL = re.compile(r"^[\s\-+(]*[\d\u0660-\u0669][\d\u0660-\u0669,.\s%()\-]*$")
-
-
-def _numeric_row(row: list[str]) -> bool:
-    cells = [c.strip() for c in row if c.strip()]
-    if not cells:
-        return False
-    return sum(1 for c in cells if _NUMERIC_CELL.match(c)) / len(cells) >= 0.6
-
-
-def _leaf_header_row(grid: list[list[str]]) -> int:
-    """Which row of this grid actually names the columns?
-
-    Not row 0. A statistical yearbook draws its caption INSIDE the table's
-    ruled frame, so the grid's first rows are the title and its number,
-    shredded across the columns, and the real header sits below them:
-
-        row0  ['Health of Beds the','Sector, / Five','10,000 Years','KSA',...]
-        row1  ['','Table','2-2','','','','','','','جدول 2-2','','']
-        row2  ['','','','Year','','','','','العام','','','']
-        row3  ['','2022G','','2021G','','2020G','','2019G','','2018G','','']
-
-    Keying records on row 0 keys every value to a fragment of the title, and
-    the table scores near zero however well it was read -- and it does so on
-    BOTH sides, because the parser makes the same assumption. Measuring a
-    parser against a reference that shares its defect cannot show a fix.
-
-    The leaf header is the last text row above the body: walk down while rows
-    are not yet numeric, and take the one immediately before the numbers
-    start. A table with no numeric body has no type break to find, so it
-    keeps row 0 -- the previous behaviour, unchanged.
-    """
-    if len(grid) < 3:
-        return 0
-    first_data = None
-    for i, row in enumerate(grid):
-        if _numeric_row(row):
-            first_data = i
-            break
-    if first_data is None or first_data == 0:
-        return 0
-    # Need at least one data row left to score.
-    if first_data >= len(grid) - 1:
-        return 0
-    return first_data - 1
-
-
 def grid_to_records(grid: list[list[str]], page: int) -> list[TableRecord]:
     """Header row + data rows -> records keyed by header, ParseBench's
     TableRecordMatch shape. A table whose header is dropped or transposed
@@ -405,10 +358,9 @@ def grid_to_records(grid: list[list[str]], page: int) -> list[TableRecord]:
             if any((r[c] if c < len(r) else "").strip() for r in grid)]
     if keep and len(keep) < ncols:
         grid = [[(r[c] if c < len(r) else "") for c in keep] for r in grid]
-    hrow = _leaf_header_row(grid)
-    header = [h or f"col{i}" for i, h in enumerate(grid[hrow])]
+    header = [h or f"col{i}" for i, h in enumerate(grid[0])]
     out = []
-    for row in grid[hrow + 1:]:
+    for row in grid[1:]:
         if not any(c.strip() for c in row):
             continue
         out.append(TableRecord(
