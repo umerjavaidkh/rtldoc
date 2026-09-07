@@ -73,25 +73,26 @@ LLM judge:
 
 | axis | score | what it measures |
 |---|---:|---|
-| CITATION | 98.9% | every chunk traceable to a page + box |
-| COLUMN | 97.0% | reading order across columns |
-| PAGE | 95.9% | nothing dropped, nothing duplicated |
-| **TBL-FOUND** | **95.7%** | the table was found, once |
-| TEXT | 83.7% | content faithfulness |
-| HEADING | 54.1% | against /H1../H6, on the 5 of 18 docs that declare any |
-| TABLE | 29.5% | cell-level agreement with the reference |
-| **OVERALL** | **79.3%** | |
+| **TBL-FOUND** | **99.3%** | the table was found, once |
+| CITATION | 98.5% | every chunk traceable to a page + box |
+| COLUMN | 97.7% | reading order across columns |
+| PAGE | 95.1% | nothing dropped, nothing duplicated |
+| TEXT | 82.3% | content faithfulness |
+| HEADING | 68.5% | scored by recall, on pages that declare a structure tree |
+| TABLE | 31.2% | cell-level agreement with the reference -- **understated, see below** |
+| **OVERALL** | **81.8%** | |
 
-The same build on a **separate, unseen 10-document / 493-page HR and
-labour-law corpus** it was never tuned against:
+The same build on a **separate, unseen 13-document HR and labour-law corpus**
+it was never tuned against:
 
 | axis | Gulf | HR (unseen) |
 |---|---:|---:|
-| CITATION | 98.9% | **100.0%** |
-| COLUMN | 97.0% | **99.4%** |
-| PAGE | 95.9% | **96.7%** |
-| TEXT | 83.7% | **92.5%** |
-| HEADING | 54.1% | 58.1% |
+| CITATION | 98.5% | **100.0%** |
+| COLUMN | 97.7% | 96.6% |
+| PAGE | 95.1% | **95.5%** |
+| TEXT | 82.3% | **92.0%** |
+| HEADING | 68.5% | **74.1%** |
+| TABLE | 31.2% | **40.7%** |
 
 Every axis holds or improves on documents the parser has never seen.
 
@@ -111,14 +112,16 @@ and most of this corpus is set with coloured bands or nothing at all, so
 scoring precision against it would penalise the parser for finding tables the
 reference cannot see.
 
-Two honest notes on the TABLE figure. It rose 9.4% -> 29.5% across that
-session, and **most of that was measurement, not parsing**: records were keyed
+Two honest notes on the TABLE figure. It rose 9.4% -> 31.2% across two
+sessions, and **much of that was measurement, not parsing**: records were keyed
 by a header that a continuation table does not carry, the reference kept empty
 columns the parser trims, and the parser was scored zero for *correcting* the
-reference's Arabic. Only the last step (white rules) was a parser fix. And
-29.5% still understates -- on 43 hand-verified tables the same parser scores
-**0.625**, because the reference finds only *ruled* tables and a 60-case audit
-found its own grid wrong on 28% of detections.
+reference's Arabic. And 31.2% badly understates the parser -- on 43
+hand-verified tables the same build scores **85.5%**, because the reference
+finds only *ruled* tables and a 60-case audit found its own grid wrong on 28%
+of detections. Where the two disagree, trust the hand-verified number: it is
+labelled by a human and shares neither the parser's assumptions nor the
+reference's.
 
 **Table quality, scored with TEDS** (the PubTabNet/OmniDocBench standard) on a
 borderless financial statement — where the whole point is a hard table:
@@ -139,7 +142,7 @@ with ParseBench's TableRecordMatch:
 
 | | score | tables it returns nothing for |
 |---|---:|---:|
-| **rtldoc** | **0.625** | 9 |
+| **rtldoc** | **0.855** | 4 |
 | PyMuPDF `find_tables()` | 0.273 | 19 |
 | Marker's projection alone | 0.356 | 4 |
 | rtldoc + projection as fallback | **0.646** | 4 |

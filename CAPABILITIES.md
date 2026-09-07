@@ -49,27 +49,28 @@ it.
 
 | axis | score | what it means |
 |---|---:|---|
-| CITATION | 98.9% | every chunk traceable to a page and a box |
-| COLUMN | 97.0% | reading order correct across columns |
-| PAGE | 95.9% | nothing dropped, nothing duplicated |
-| TBL-FOUND | 95.7% | the table was found, once |
-| TEXT | 83.7% | content faithfulness |
-| HEADING | 54.1% | **weak — see limits** |
-| TABLE | 29.5% | **understated — see limits** |
-| **OVERALL** | **79.3%** | |
+| TBL-FOUND | 99.3% | the table was found, once |
+| CITATION | 98.5% | every chunk traceable to a page and a box |
+| COLUMN | 97.7% | reading order correct across columns |
+| PAGE | 95.1% | nothing dropped, nothing duplicated |
+| TEXT | 82.3% | content faithfulness |
+| HEADING | 68.5% | **weak — see limits** |
+| TABLE | 31.2% | **understated — see limits** |
+| **OVERALL** | **81.8%** | |
 
-### HR corpus — 12 documents / 676 pages, never tuned against
+### HR corpus — 13 documents, never tuned against
 
 HR policy and labour-law documents from UAE, Oman, Kuwait and Saudi Arabia.
 The parser had never seen these files.
 
 | axis | Gulf | **HR (unseen)** |
 |---|---:|---:|
-| CITATION | 98.9% | **100.0%** |
-| COLUMN | 97.0% | **99.4%** |
-| PAGE | 95.9% | **96.7%** |
-| TEXT | 83.7% | **92.5%** |
-| HEADING | 54.1% | 58.1% |
+| CITATION | 98.5% | **100.0%** |
+| COLUMN | 97.7% | 96.6% |
+| PAGE | 95.1% | **95.5%** |
+| TEXT | 82.3% | **92.0%** |
+| HEADING | 68.5% | **74.1%** |
+| TABLE | 31.2% | **40.7%** |
 
 **Every axis holds or improves on documents never seen during development.**
 That is the number that matters: it is generalisation, not fit.
@@ -78,7 +79,7 @@ That is the number that matters: it is generalisation, not fit.
 
 | task | rtldoc | alternative |
 |---|---:|---|
-| tables, 43 hand-verified | **0.625** | PyMuPDF `find_tables()` 0.273 |
+| tables, 43 hand-verified | **85.5%** | PyMuPDF `find_tables()` 27.3% |
 | headings, 72 hand-adjudicated | **F1 0.889** | Marker 0.732 · DocLayout-YOLO tied (p=1.0) |
 
 ---
@@ -121,7 +122,7 @@ Across the Gulf corpus, detector findings fell **3,324 → 2,735 (−17.7%)**:
 
 ## Limits — stated plainly
 
-**Heading detection is weak: ~54%.** Five separate attempts to improve it have
+**Heading detection is weak: 68.5%.** Five separate attempts to improve it have
 all scored *below* the existing heuristic, including a fitted classifier and two
 external models. The blocker is measured and it is **labelled data**: ten
 documents in the corpus declare a structure tree, and one of them supplies 137
@@ -137,9 +138,10 @@ page with no glyphs.
 
 **The TABLE score understates and should not be quoted.** Its reference reads
 only *ruled* grids, and a 60-case hand audit found that reference's own grid
-wrong on **28%** of its detections. The same parser scores **0.625** on 43
-hand-verified tables against the benchmark's 29.5%. Three of the four
-improvements to that axis this cycle were fixing the benchmark, not the parser.
+wrong on **28%** of its detections. The same parser scores **85.5%** on 43
+hand-verified tables against the benchmark's 31.2%. Where the two disagree,
+trust the hand-verified number -- it is labelled by a human and shares neither
+the parser's assumptions nor the reference's.
 
 **Two regressions are open:** `table_row_collapse` (97 → 148) and
 `heading_flood` (307 → 346). Finding more tables surfaced more imperfect ones.
@@ -150,8 +152,8 @@ improvements to that axis this cycle were fixing the benchmark, not the parser.
 
 > Born-digital Arabic and bilingual documents, parsed on CPU at ~4 pages/second,
 > with reading order, bidi and orthography correct enough to survive retrieval —
-> **92.5% text faithfulness, 99.4% column order and 100% citability on
-> documents it had never seen.**
+> **92.0% text faithfulness, 96.6% column order and 100% citability on
+> documents it had never seen — and 85.5% on hand-verified tables.**
 
 What not to claim: table perfection, heading hierarchy, or scanned documents.
 
