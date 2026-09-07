@@ -1301,6 +1301,9 @@ def _declared_ranks(page: "fitz.Page") -> list[tuple[tuple[float, float], int]]:
 
 # Adopt PyMuPDF's column geometry only on a real disagreement.
 COL_COUNT_DISAGREE = 2
+# Above this many drawing primitives a page is an illustration, not a table,
+# and asking PyMuPDF to find tables in it costs minutes.
+FIND_TABLES_MAX_DRAWINGS = 3000
 
 
 def _same_column_shape(regions: list) -> bool:
@@ -1345,6 +1348,19 @@ def _adopt_found_tables(regions: list, page) -> list:
     if page is None:
         return regions
     try:
+        # find_tables() cleans the page's graphics first, and that pass is
+        # quadratic in drawing primitives: on a 23,000-primitive vector
+        # illustration it spends 87 SECONDS and 113 million neighbour tests
+        # in pymupdf/table.py before returning nothing useful. Half the pages
+        # of one 52-page report are like that, which held a corpus run's
+        # worker at 100% CPU for over half an hour.
+        #
+        # A drawn table is tens to hundreds of rules. The pages that stall
+        # carry 23,061-23,083 primitives; the ones that do not carry 4 and
+        # 158. Nothing is lost by declining to look for a table inside an
+        # illustration.
+        if len(page.get_drawings()) > FIND_TABLES_MAX_DRAWINGS:
+            return regions
         found = page.find_tables(strategy="lines").tables
     except Exception:
         return regions
