@@ -1,0 +1,35 @@
+# CodeQL is free for public repositories and is the only check here that looks
+# for real vulnerabilities rather than style. rtldoc's whole job is to read
+# files it did not produce: every parser path runs on attacker-controlled
+# bytes, so this is not optional decoration.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so newly published queries reach existing code without a push.
+    - cron: "23 5 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # build-mode none: nothing is compiled, so CodeQL reads the sources
+      # directly and needs no dependency install.
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          build-mode: none
+          queries: security-and-quality
+          config-file: ./.github/codeql/codeql-config.yml
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:python
