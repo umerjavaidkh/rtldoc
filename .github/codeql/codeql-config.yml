@@ -1,0 +1,15 @@
+# CodeQL configuration.
+#
+# Only third-party code we did not write is excluded. Everything rtldoc runs on
+# untrusted input -- the primitives layer, the layout engine, the OCR shell-out
+# -- stays in scope, which is the point: a parser's attack surface is its
+# parsing code.
+
+name: rtldoc
+
+paths-ignore:
+  # Vendored from an upstream project under its own licence. We do not maintain
+  # it and cannot fix findings here without diverging from upstream; carrying
+  # its results would be noise, and noise is how a real finding gets scrolled
+  # past.
+  - vendor

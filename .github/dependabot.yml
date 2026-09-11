@@ -1,0 +1,17 @@
+# Automated dependency PRs. rtldoc parses untrusted PDFs, and the parsing
+# surface is almost entirely PyMuPDF -- a CVE there is reachable from the
+# first byte of any file a user hands us, so waiting to notice one by hand
+# is not a plan.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule: { interval: weekly }
+
+  # A compromised action runs with whatever the workflow grants it. Pinning
+  # by major tag alone means a moved tag ships new code with no PR to review.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      actions: { patterns: ["*"] }
